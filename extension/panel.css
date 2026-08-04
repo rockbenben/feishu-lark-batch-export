@@ -1,0 +1,233 @@
+/* 面板的视觉身份跟 logo、社交图同一套：墨色的柜子，里面装着纸。
+   刻意不用飞书蓝 —— 这是这个工具唯一属于自己的界面，不该 cosplay 宿主应用。 */
+#fbe-fab, #fbe-panel {
+  --ink: #101C22;
+  --slate: #1E3440;
+  --paper: #F2EDE4;
+  --amber: #E8A33D;
+  --amber-deep: #C97E1E;
+  --text: #46545C;
+  --dim: #8C979D;
+  --line: rgba(16, 28, 34, .13);
+  --mono: "Sarasa Fixed SC Nerd Font", "Sarasa Mono SC", ui-monospace, Consolas, Menlo, monospace;
+  --sans: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+/* display 会盖掉 [hidden] 的 UA 样式，这几条必须在前面兜住 */
+#fbe-panel[hidden], #fbe-fab[hidden], #fbe-tree[hidden], #fbe-empty[hidden],
+#fbe-tree div[hidden], #fbe-progress[hidden], #fbe-log[hidden] { display: none }
+
+/* right/bottom 由 JS 设（可拖动、位置记住），这里只是 JS 跑起来之前的兜底值。
+   touch-action:none 是 pointer 事件拖拽必需的，否则触屏上会被滚动手势抢走。 */
+/* 只有文字，没有记号。按钮上任何一个小色块都会被读成状态灯 —— 试过一颗琥珀方块，
+   在媒体控件的语汇里那就是停止/暂停。身份由工具栏图标和面板页眉承担，这里不需要。 */
+#fbe-fab {
+  position: fixed; right: 20px; bottom: 150px; z-index: 2147483000;
+  padding: 9px 15px; border: 0; border-radius: 8px;
+  background: var(--ink); color: var(--paper);
+  font: 500 13px/1 var(--sans); letter-spacing: .01em;
+  cursor: grab; touch-action: none; user-select: none;
+  box-shadow: 0 3px 14px rgba(16, 28, 34, .3);
+}
+#fbe-fab:hover { background: var(--slate) }
+#fbe-fab:active { cursor: grabbing }
+
+#fbe-panel {
+  position: fixed; right: 20px; bottom: 20px; z-index: 2147483000;
+  width: 428px; max-height: 82vh; display: flex; flex-direction: column;
+  background: var(--paper); color: var(--text);
+  border-radius: 10px; overflow: hidden;
+  font: 13px/1.6 var(--sans);
+  box-shadow: 0 18px 48px rgba(16, 28, 34, .28), 0 0 0 1px rgba(16, 28, 34, .1);
+}
+
+/* ── 页眉：柜体 ── */
+/* 页眉用无衬线：等宽的中日韩字每字都是全宽，再加字距就散架了。
+   等宽留给真正需要对齐的地方 —— 树、文件名、数字。 */
+#fbe-panel header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 14px; background: var(--ink); color: var(--paper);
+  font: 500 13px/1.2 var(--sans); letter-spacing: .02em;
+}
+.fbe-head-right { display: flex; align-items: center; gap: 9px }
+#fbe-repo { display: flex; color: rgba(242, 237, 228, .5) }
+#fbe-repo:hover { color: var(--paper) }
+
+/* 语言必须留在明处：看不懂当前界面语言的人，正是最需要找到它的人 ——
+   把它藏进一个中文标题的折叠区里，等于让他先读懂中文才能改成英文。
+   选择器要写成 #fbe-panel #fbe-lang（2,0,0）才压得住下面的
+   #fbe-panel select（1,0,1）—— 之前就是被它盖成白底，像块贴在墨色页眉上的补丁。 */
+#fbe-panel #fbe-lang {
+  padding: 3px 6px; border-radius: 4px;
+  border: 1px solid rgba(242, 237, 228, .28);
+  background: rgba(242, 237, 228, .07); color: var(--paper);
+  font: 11.5px/1.3 var(--sans);
+}
+#fbe-panel #fbe-lang:hover { border-color: rgba(242, 237, 228, .5) }
+#fbe-panel #fbe-lang option { color: #1f2329; background: #fff }
+/* 必须是 button：原来写成 span，键盘用户聚焦不到，也就没有任何办法关掉面板 */
+#fbe-close {
+  border: 0; background: transparent; padding: 0 2px; cursor: pointer;
+  font: 17px/1 var(--sans); color: rgba(242, 237, 228, .55);
+}
+#fbe-close:hover { color: var(--paper) }
+
+/* ── 步骤条 ──
+   这个面板真的是三步走（列出 → 勾选 → 导出），序号在这里是内容本身的结构，
+   不是装饰。新用户光看下拉框和按钮名猜不出顺序，写出来就不用猜。 */
+.fbe-step {
+  display: flex; align-items: center; gap: 7px;
+  padding: 10px 14px 5px; color: var(--dim);
+  font-size: 11.5px; letter-spacing: .02em;
+}
+.fbe-step b {
+  flex: none; width: 15px; height: 15px; border-radius: 50%;
+  background: rgba(16, 28, 34, .1); color: var(--text);
+  font: 600 10px/15px var(--sans); text-align: center;
+}
+
+/* ── 骨架 ──
+   面板 = 页眉 + 可滚动的中段 + 钉在底部的操作区。
+   这不是为了好看：flex 子项默认 flex-shrink:1，全都设成 flex:none 之后面板
+   就有了约 600px 的最小高度，而面板是 overflow:hidden —— 视口低于 ~735px
+   （1366×768 的笔记本去掉浏览器界面就是这个数）时，底部的「开始导出」会被
+   直接裁掉。主操作任何时候都不该滚出视线，所以它钉在下面，中段自己滚。 */
+#fbe-panel > * { flex: none }
+#fbe-panel > #fbe-body { flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column }
+#fbe-body > * { flex: none }
+#fbe-body > #fbe-tree, #fbe-body > #fbe-empty { flex: 1 }
+
+/* ── 行 ── */
+
+.fbe-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px; border-bottom: 1px solid var(--line);
+}
+.fbe-row--find #fbe-q { flex: 1; min-width: 0 }
+.fbe-row--tally { font-size: 12px; color: var(--dim) }
+.fbe-row--tally #fbe-count { flex: 1; font-variant-numeric: tabular-nums }
+/* 「导出为」和「更多设置」是同一件事的两半，中间不该有线把它们切开 */
+.fbe-row--format { border-bottom: 0; padding-bottom: 4px }
+.fbe-row--go { border-bottom: 0; padding: 12px 14px }
+.fbe-lede { color: var(--dim); font-size: 12px }
+
+#fbe-panel select,
+#fbe-panel input[type=search] {
+  padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px;
+  background: #FBF9F5; color: var(--text);
+  font: 12px/1.4 var(--sans); box-sizing: border-box;
+}
+#fbe-panel input[type=search]::placeholder { color: var(--dim) }
+#fbe-panel select:disabled { opacity: .45 }
+
+.fbe-btn {
+  padding: 6px 13px; border: 1px solid var(--line); border-radius: 5px;
+  background: #FBF9F5; color: var(--text);
+  font: 12px/1.4 var(--sans); cursor: pointer;
+}
+.fbe-btn:hover:not(:disabled) { background: #fff; border-color: rgba(16, 28, 34, .22) }
+.fbe-btn:disabled { opacity: .45; cursor: default }
+
+/* 唯一的重色控件：整条流程只有这一个「现在开始」 */
+.fbe-btn--go {
+  flex: 1; padding: 10px 16px; border: 0; border-radius: 6px;
+  background: var(--amber-deep); color: #fff;
+  font: 600 13px/1.4 var(--sans); letter-spacing: .02em;
+}
+.fbe-btn--go:hover:not(:disabled) { background: #B36F16 }
+/* 没东西可导时它不该是屏幕上最重的一块 —— 退成描边，别抢注意力 */
+.fbe-btn--go:disabled {
+  background: transparent; color: var(--dim); opacity: 1;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.fbe-check { display: flex; align-items: center; gap: 5px; cursor: pointer;
+  font: 12px/1 var(--sans); color: var(--text) }
+
+/* ── 装箱单：这个面板的主角 ── */
+/* 88px ≈ 三行。再矮就不像个列表了；但也不能更高，否则小屏上中段挤不下 */
+#fbe-tree { overflow: auto; min-height: 88px; padding: 5px 0 }
+#fbe-tree > div {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 14px; white-space: nowrap;
+}
+#fbe-tree > div:hover { background: rgba(16, 28, 34, .045) }
+.fbe-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+  font: 12.5px/1.6 var(--mono); color: var(--text);
+}
+/* 类型右对齐成一列 —— 这一列才让它读起来像清单，而不是文件选择器 */
+.fbe-kind {
+  flex: none; font: 11px/1.6 var(--mono); font-style: normal;
+  color: var(--dim); letter-spacing: .04em;
+}
+#fbe-tree input[type=checkbox] { flex: none; accent-color: var(--amber-deep); margin: 0 }
+/* 导不出来的类型：勾不上，也别让它看起来像能勾 */
+.fbe-dead { opacity: .42 }
+.fbe-dead .fbe-name { cursor: default }
+
+#fbe-empty {
+  min-height: 88px; margin: 0;
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  padding: 20px 34px; color: var(--dim); font-size: 12.5px;
+}
+
+/* ── 更多设置：默认收起。默认值本来就该是对的，多数人不用打开 ── */
+#fbe-more { border-bottom: 1px solid var(--line) }
+/* 原来是一行灰字，看着像脚注不像控件，新用户根本不会去点 */
+#fbe-more > summary {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin: 0 14px 10px; padding: 5px 11px 5px 9px;
+  border: 1px solid var(--line); border-radius: 5px; background: #FBF9F5;
+  cursor: pointer; color: var(--text); font-size: 12px;
+  list-style: none; user-select: none;
+}
+#fbe-more > summary:hover { background: #fff; border-color: rgba(16, 28, 34, .22) }
+#fbe-more > summary::-webkit-details-marker { display: none }
+#fbe-more > summary::before { content: "▸ "; font-size: 10px }
+#fbe-more[open] > summary::before { content: "▾ " }
+#fbe-more > summary:hover { color: var(--text) }
+/* flex-start：说明有两行时，方框必须对齐标题那一行，不能跟整块居中 */
+.fbe-opt {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 6px 16px 7px; cursor: pointer;
+  font-size: 12.5px; font-weight: 500; color: var(--text);
+}
+.fbe-opt:hover { background: rgba(16, 28, 34, .045) }
+.fbe-opt input { flex: none; margin: 2px 0 0; accent-color: var(--amber-deep) }
+.fbe-opt em { display: block; font-style: normal; font-weight: 400; color: var(--dim);
+  font-size: 11.5px; line-height: 1.6; margin-top: 2px }
+#fbe-hint {
+  margin: 5px 0 0; padding: 9px 16px 11px;
+  border-top: 1px solid var(--line);
+  color: var(--dim); font-size: 11.5px; line-height: 1.65;
+}
+
+/* ── 运行时 ── */
+#fbe-progress {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px; border-top: 1px solid var(--line);
+  font: 11.5px/1 var(--mono); color: var(--dim);
+}
+#fbe-progress .track { flex: 1; height: 3px; border-radius: 2px;
+  background: rgba(16, 28, 34, .12); overflow: hidden }
+#fbe-progress-fill { height: 100%; width: 0; background: var(--amber);
+  border-radius: 2px; transition: width .25s ease }
+#fbe-progress-text { white-space: nowrap; font-variant-numeric: tabular-nums }
+
+/* 一次导出要盯十分钟，日志值得被当成正经排版对待，而不是个 <pre> 垃圾桶 */
+#fbe-log {
+  margin: 0; padding: 9px 14px 11px; min-height: 44px; max-height: 132px; overflow: auto;
+  border-top: 1px solid var(--line); background: rgba(16, 28, 34, .035);
+  font: 11.5px/1.85 var(--mono); color: var(--text);
+  white-space: pre-wrap; word-break: break-all;
+}
+
+/* 质量底线：可见的键盘焦点、尊重减少动效 */
+#fbe-panel :is(button, select, input, summary):focus-visible {
+  outline: 2px solid var(--amber-deep); outline-offset: 1px; border-radius: 4px;
+}
+@media (prefers-reduced-motion: reduce) {
+  #fbe-progress-fill { transition: none }
+}

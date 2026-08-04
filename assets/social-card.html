@@ -1,0 +1,122 @@
+<!-- 1200×630 社交预览图。渲染：
+     node ~/.claude/skills/html-shot/render.mjs assets/social-card.html assets/social-card.png --palette -->
+<html lang="zh-CN">
+<meta charset="utf-8">
+<style>
+  :root {
+    --ink: #101C22;        /* 档案柜的墨绿黑 */
+    --slate: #1E3440;
+    --amber: #E8A33D;      /* 信号色：已选中 / 24h 倒计时 */
+    --amber-deep: #C97E1E;
+    --paper: #F2EDE4;      /* 纸。只作为「物件」出现，不做整版背景 */
+
+    /* 宋体做标题：文档感、档案感。黑体做正文。等宽用 CJK 等宽，
+       否则中文落进 Consolas 会字距散架，而文件树的母语就是等宽。 */
+    --serif: "Noto Serif SC", "Source Han Serif SC", "华文中宋", serif;
+    --sans: "Noto Sans SC", "思源黑体", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: "Sarasa Fixed SC Nerd Font", "Sarasa Mono SC", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; width: 1200px; height: 630px; position: relative; overflow: hidden;
+    background: radial-gradient(125% 145% at 6% -10%, var(--slate) 0%, var(--ink) 60%);
+    color: var(--paper); font-family: var(--sans);
+    display: grid; grid-template-columns: 512px 1fr; align-items: center;
+    padding: 0 64px; gap: 20px;
+  }
+
+  /* ── 左：说事 ── */
+  .eyebrow {
+    font-size: 14.5px; letter-spacing: .24em; color: var(--amber); margin-bottom: 24px;
+  }
+  h1 {
+    font-family: var(--serif); font-weight: 700; font-size: 78px; line-height: 1.14;
+    letter-spacing: .03em; margin: 0;
+  }
+  .rule { width: 68px; height: 3px; background: var(--amber); margin: 28px 0 22px; }
+  .deck { font-size: 22px; line-height: 1.7; color: #DAD4C9; margin: 0; font-weight: 300; }
+  .meta {
+    margin-top: 34px; padding-top: 18px; border-top: 1px solid rgba(242, 237, 228, .13);
+    font-size: 14.5px; line-height: 1.95; color: #93A2AB; font-weight: 300;
+  }
+  .meta b { color: var(--amber); font-weight: 400; }
+  .meta .sep { color: rgba(242, 237, 228, .22); margin: 0 10px; }
+
+  /* ── 右：把「一棵树 → 一个包」直接画出来 ── */
+  .flow { display: flex; align-items: center; gap: 6px; }
+
+  .panel {
+    width: 306px; flex: none; background: var(--paper); border-radius: 12px; padding: 15px 13px;
+    box-shadow: 0 26px 52px rgba(0, 0, 0, .45);
+  }
+  .row { display: flex; align-items: center; gap: 9px; padding: 5px 4px; }
+  .row.kid { padding-left: 20px; }
+  .row.kid2 { padding-left: 40px; }
+  .box {
+    width: 15px; height: 15px; border-radius: 4px; flex: none;
+    border: 2px solid #A7B1B6; background: transparent; position: relative;
+  }
+  .row.on .box { background: var(--amber); border-color: var(--amber-deep); }
+  /* 半选：自己没选中，但下面有选中的 —— 扩展里真实存在的第三种状态 */
+  .row.half .box { border-color: var(--amber-deep); }
+  .row.half .box::after {
+    content: ""; position: absolute; left: 2px; right: 2px; top: 4px;
+    height: 3px; border-radius: 2px; background: var(--amber-deep);
+  }
+  .name { font-family: var(--mono); font-size: 13.5px; color: #46545C; white-space: nowrap; }
+  .row.on .name { color: var(--ink); }
+
+  /* 招牌元素：一个琥珀色花括号，把一棵树收进一个包。
+     「}」本来就是「这些合并成一个」的字符，比画箭头准确，也和整体的字体优先方向一致。 */
+  .brace {
+    font-family: var(--serif); font-weight: 900; font-size: 172px; line-height: .78;
+    color: var(--amber); flex: none;
+  }
+
+  .zip {
+    flex: none; background: var(--paper); color: var(--ink); border-radius: 12px;
+    padding: 15px 17px; box-shadow: 0 26px 52px rgba(0, 0, 0, .45);
+  }
+  .zip .file { font-family: var(--mono); font-size: 14.5px; white-space: nowrap; font-weight: 700; }
+  .zip .sub { font-size: 12.5px; color: #64737B; margin-top: 7px; font-weight: 300; }
+  .zip .bar { height: 3px; background: var(--amber); border-radius: 2px; margin-top: 13px; }
+
+  .stamp {
+    position: absolute; left: 64px; bottom: 34px;
+    font-family: var(--mono); font-size: 12.5px; letter-spacing: .12em;
+    color: rgba(242, 237, 228, .3);
+  }
+</style>
+
+<div>
+  <div class="eyebrow">Chrome 扩展 · 飞书 / Lark</div>
+  <h1>飞书云文档<br>批量导出</h1>
+  <div class="rule"></div>
+  <p class="deck">一篇篇点太慢了。<br>在知识库树里勾一批，拿一个 zip。</p>
+  <div class="meta">
+    Markdown · Word · PDF<span class="sep">|</span>目录结构原样保留<br>
+    图片一并抓到本地 —— <b>它们的链接 24 小时后就失效</b>
+  </div>
+</div>
+
+<div class="flow">
+  <div class="panel">
+    <div class="row half"><i class="box"></i><span class="name">Blog 文章发布</span></div>
+    <div class="row kid on"><i class="box"></i><span class="name">文案套路.md</span></div>
+    <div class="row kid on"><i class="box"></i><span class="name">故事框架.md</span></div>
+    <div class="row kid half"><i class="box"></i><span class="name">素材库</span></div>
+    <div class="row kid2 on"><i class="box"></i><span class="name">金句结构.md</span></div>
+    <div class="row kid2"><i class="box"></i><span class="name">开头结尾.md</span></div>
+    <div class="row kid on"><i class="box"></i><span class="name">标题收集库.md</span></div>
+    <div class="row on"><i class="box"></i><span class="name">每日输出.md</span></div>
+  </div>
+  <div class="brace">}</div>
+  <div class="zip">
+    <div class="file">飞书导出.zip</div>
+    <div class="sub">5 篇 · 含图片</div>
+    <div class="bar"></div>
+  </div>
+</div>
+
+<div class="stamp">365 开源计划 · #032</div>
+</html>

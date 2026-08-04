@@ -1,0 +1,33 @@
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; }
+  /* 形状挂在子元素上：body 的背景会传播到根画布，而根画布不受 border-radius 裁剪。
+     尺寸全用 vmin，同一份设计渲染成 16 / 32 / 48 / 128 都能填满。 */
+  .tile {
+    width: 100vmin; height: 100vmin; border-radius: 23vmin;
+    background: linear-gradient(157deg, #1E3440 0%, #101C22 100%);
+    display: flex; align-items: center; justify-content: center;
+  }
+  svg { width: 100%; height: 100%; display: block; }
+</style>
+<div class="tile">
+  <!-- 画的是面板自己的样子：缩进的勾选行，父节点空框、子节点实心 —— 也就是这个工具
+       真正的语义（在树里挑一部分）。不画下载箭头：那是任何下载器都能用的通用符号，
+       说不出这个工具在干什么，还容易跟宿主应用的图标混。
+       16px 下只剩 ~14 个可用像素，细节到此为止：再多一行就糊成一团。 -->
+  <svg viewBox="0 0 100 100">
+    <!-- 标题条。糊掉之后留下的「行」的节奏，是小尺寸下唯一还在工作的信息 -->
+    <g fill="#F2EDE4" opacity=".42">
+      <rect x="40" y="20" width="46" height="10" rx="5" />
+      <rect x="58" y="45" width="28" height="10" rx="5" />
+      <rect x="58" y="70" width="28" height="10" rx="5" />
+    </g>
+    <!-- 父节点：空框 = 自己没选中 -->
+    <rect x="16" y="16" width="18" height="18" rx="4.5" fill="none" stroke="#F2EDE4" stroke-width="6"/>
+    <!-- 子节点：实心 = 已选中，缩进一级 -->
+    <g fill="#E8A33D">
+      <rect x="34" y="41" width="18" height="18" rx="4.5" />
+      <rect x="34" y="66" width="18" height="18" rx="4.5" />
+    </g>
+  </svg>
+</div>

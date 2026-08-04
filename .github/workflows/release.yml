@@ -1,0 +1,74 @@
+name: CI
+
+# 平时推 main 只跑测试；打个 v1.0.0 这样的 tag 才额外打包并建 Release。
+# 测试得在 tag 之前就有机会红 —— 只在发布时跑的闸门，红的时候 tag 已经推出去了。
+# 不给 workflow_dispatch：手点时 GITHUB_REF_NAME 是分支名，
+# 下面的版本校验拿它去比 manifest 必然不一致，等于挂一个注定失败的入口。
+# 要补发就删掉 tag 重新推。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write # 建 Release 需要
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      # 测试是发布的闸门：没构建步骤，但逻辑和两份语言文件都有守卫
+      - name: test
+        run: node --test test.mjs
+
+      # tag 和 manifest 版本对不上是最容易犯又最难发现的错 —— 商店里显示的是
+      # manifest 那个，Release 页显示的是 tag，不一致就没人说得清装的是哪版
+      - name: 校验 tag 与 manifest 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(node -p "require('./extension/manifest.json').version")
+          echo "tag=$tag  manifest=$manifest"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag ($tag) 和 extension/manifest.json ($manifest) 版本不一致"
+            exit 1
+          fi
+
+      # extension/ 里的每个文件都该进包，所以整个目录直接打进去，没有排除清单要维护
+      # （设计源文件在 assets/）。在目录里面打包，zip 根目录直接就是 manifest.json ——
+      # 这个 zip 同时是商店上传的包，商店只认 manifest 在根的，多套一层就判「找不到 manifest」。
+      - name: 打包扩展
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          zip="feishu-lark-batch-export-${GITHUB_REF_NAME}.zip"
+          (cd extension && zip -r "../$zip" . -x '*.DS_Store')
+          unzip -Z1 "$zip"
+          unzip -Z1 "$zip" | grep -qx 'manifest.json' \
+            || { echo "::error::manifest.json 不在 zip 根目录，商店会拒"; exit 1; }
+
+      # 只能给一种 notes：--notes-file 和 --generate-notes 同时给，gh 会直接报错退出。
+      # 选自己写的安装说明 —— 对装扩展的人比一串 commit 列表有用。
+      - name: 建 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md <<'EOF'
+          下载下面的 zip 并解压，然后：
+
+          1. 打开 `chrome://extensions`，右上角开启**开发者模式**
+          2. 点「加载已解压的扩展程序」，选中解压出来的那个文件夹（里面直接就是 `manifest.json`）
+          3. 打开飞书或 Lark 任意页面，右下角出现「批量导出」按钮
+
+          用法见 [README](https://github.com/rockbenben/feishu-lark-batch-export#用法)。
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            "feishu-lark-batch-export-${GITHUB_REF_NAME}.zip" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md
