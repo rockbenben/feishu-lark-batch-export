@@ -2,9 +2,9 @@
 
 > 飞书的导出只能一篇一篇点。这个 Chrome 扩展让你在树里勾一批，拿一个 zip。
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![365 开源计划 #032](https://img.shields.io/badge/365%20%E5%BC%80%E6%BA%90%E8%AE%A1%E5%88%92-%23032-1f6feb)](https://github.com/rockbenben/365opensource)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![Chrome 应用商店](https://img.shields.io/chrome-web-store/v/lomkhccnocgfifghblhfidifhnilcgdi)](https://chromewebstore.google.com/detail/lomkhccnocgfifghblhfidifhnilcgdi) [![365 开源计划 #032](https://img.shields.io/badge/365%20%E5%BC%80%E6%BA%90%E8%AE%A1%E5%88%92-%23032-1f6feb)](https://github.com/rockbenben/365opensource)
 
-[⬇ 下载扩展](https://github.com/rockbenben/feishu-lark-batch-export/releases/latest) · [English](README.en.md)
+[⬇ 从 Chrome 应用商店安装](https://chromewebstore.google.com/detail/lomkhccnocgfifghblhfidifhnilcgdi) · [English](README.en.md)
 
 <img src="assets/panel.png" width="380" align="right" alt="面板：列出知识库、勾选文档、开始导出">
 
@@ -18,15 +18,19 @@
 
 ## 安装
 
-下载上面的 zip 解压（打 tag 时由 GitHub Actions 自动打包），或者直接 clone 本仓库。然后：
+[从 Chrome 应用商店安装](https://chromewebstore.google.com/detail/lomkhccnocgfifghblhfidifhnilcgdi)，点「添加至 Chrome」。**已经开着的飞书标签页要刷新一下**，扩展不会注入到装之前就打开的页面。
+
+界面语言默认跟浏览器走，中英文都有；面板右上角可以手动改。
+
+匹配 `*.feishu.cn` 和 `*.larksuite.com`（含 `xxx.jp.larksuite.com` 这种带区域的子域名）。两边的接口路径、类型矩阵、图片取法都实测一致。私有部署域名（`*.larkoffice.com` 等）没测过，需要的话在 `manifest.json` 的 `matches` 和 `host_permissions` 里各加一条，代码不用动 —— 改完按下面这样装。
+
+### 开发者模式手动安装
+
+想看代码、要改上面那两行域名，或者装不了商店的，走这条。[下载 zip](https://github.com/rockbenben/feishu-lark-batch-export/releases/latest) 解压（打 tag 时由 GitHub Actions 自动打包），或者直接 clone 本仓库。然后：
 
 1. 打开 `chrome://extensions`，右上角开启**开发者模式**。
 2. 点**「加载已解压的扩展程序」**，选中放着 `manifest.json` 的那个目录（zip 解压出来的那个文件夹，或 clone 下来的 **`extension/`**）。
 3. 打开飞书任意页面，右下角出现「批量导出」按钮。
-
-界面语言默认跟浏览器走，中英文都有；面板右上角可以手动改。
-
-匹配 `*.feishu.cn` 和 `*.larksuite.com`（含 `xxx.jp.larksuite.com` 这种带区域的子域名）。两边的接口路径、类型矩阵、图片取法都实测一致。私有部署域名（`*.larkoffice.com` 等）没测过，需要的话在 `manifest.json` 的 `matches` 和 `host_permissions` 里各加一条，代码不用动。
 
 ## 用法
 

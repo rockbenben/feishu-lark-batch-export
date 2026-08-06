@@ -1,5 +1,7 @@
 # Chrome 应用商店提交材料
 
+**已上架**：https://chromewebstore.google.com/detail/lomkhccnocgfifghblhfidifhnilcgdi
+
 提交时逐项照抄。**名称和简介不用在这里填** —— 它们来自 `extension/_locales/*/messages.json` 的 `extName` / `extDesc`，商店会按用户语言自动取，改这两处即可（测试会守住 45 / 132 字符上限）。
 
 ## 基本信息

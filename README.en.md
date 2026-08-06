@@ -2,9 +2,9 @@
 
 > Feishu exports one document at a time. This Chrome extension lets you check off a batch and get a single zip.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![365 Open Source Plan #032](https://img.shields.io/badge/365%20Open%20Source%20Plan-%23032-1f6feb)](https://github.com/rockbenben/365opensource)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![Chrome Web Store](https://img.shields.io/chrome-web-store/v/lomkhccnocgfifghblhfidifhnilcgdi)](https://chromewebstore.google.com/detail/lomkhccnocgfifghblhfidifhnilcgdi) [![365 Open Source Plan #032](https://img.shields.io/badge/365%20Open%20Source%20Plan-%23032-1f6feb)](https://github.com/rockbenben/365opensource)
 
-[⬇ Download](https://github.com/rockbenben/feishu-lark-batch-export/releases/latest) · [简体中文](README.md)
+[⬇ Install from the Chrome Web Store](https://chromewebstore.google.com/detail/lomkhccnocgfifghblhfidifhnilcgdi) · [简体中文](README.md)
 
 <img src="assets/panel-en.png" width="380" align="right" alt="The panel: list a wiki, check documents, export">
 
@@ -18,15 +18,19 @@ Once installed, click the small button in the bottom-right corner of any Feishu 
 
 ## Install
 
-Unzip the download above (GitHub Actions packages it on every tag), or clone this repo. Then:
+[Install from the Chrome Web Store](https://chromewebstore.google.com/detail/lomkhccnocgfifghblhfidifhnilcgdi) and click **Add to Chrome**. **Reload any Feishu tab you already had open** — the extension is not injected into pages that were loaded before it was installed.
+
+The UI follows your browser language (Chinese and English are included); you can also switch it in the top-right of the panel.
+
+Matches `*.feishu.cn` and `*.larksuite.com`, including region subdomains like `xxx.jp.larksuite.com`. Both were tested against live accounts: same API paths, same type matrix, same image-fetch rules. Self-hosted domains (`*.larkoffice.com` and friends) are untested — add one line to `matches` and `host_permissions` in `manifest.json`, no code change, then load it the way below.
+
+### Load unpacked (developer mode)
+
+For reading the code first, editing those two domain lines, or when the store isn't an option. [Download the zip](https://github.com/rockbenben/feishu-lark-batch-export/releases/latest) and unzip it (GitHub Actions packages it on every tag), or clone this repo. Then:
 
 1. Open `chrome://extensions` and turn on **Developer mode** (top right).
 2. Click **Load unpacked** and pick the folder that holds `manifest.json` — the one the zip unpacked to, or **`extension/`** if you cloned.
 3. Open any Feishu page. A **Batch export** button appears in the bottom-right corner.
-
-The UI follows your browser language (Chinese and English are included); you can also switch it in the top-right of the panel.
-
-Matches `*.feishu.cn` and `*.larksuite.com`, including region subdomains like `xxx.jp.larksuite.com`. Both were tested against live accounts: same API paths, same type matrix, same image-fetch rules. Self-hosted domains (`*.larkoffice.com` and friends) are untested — add one line to `matches` and `host_permissions` in `manifest.json`. No code change.
 
 ## Usage
 
