@@ -105,6 +105,18 @@
     return stem.toLowerCase().endsWith(`.${ext.toLowerCase()}`) ? stem : `${stem}.${ext}`;
   }
 
+  // 按 cookie 名精确取值。不能用 /name=([^;]+)/ 去 match 整条 cookie 串：
+  // `_csrf_token=` 正好是 `passport_csrf_token=` 的后缀，飞书页面上后者就在、还常排在
+  // 前面，于是子串匹配会把别人的值当成 CSRF token 发出去 —— /export/create/ 一律
+  // 403 + 纯文本 csrf token error。值里可能有 base64 的 `=`，所以只切第一个 `=`。
+  function readCookie(cookieString, name) {
+    for (const part of String(cookieString == null ? '' : cookieString).split(';')) {
+      const i = part.indexOf('=');
+      if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+    }
+    return '';
+  }
+
   // 小于 1 MB 时显示 KB。几个 md 文件本来就到不了 1 MB，
   // 报「0.0 MB」看着像是什么都没导出来。单位不用翻译。
   function formatSize(bytes) {
@@ -258,7 +270,7 @@
     module.exports = {
       pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot, TYPES,
       crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem, descendantEnd,
-      buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, formatSize,
+      buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, formatSize, readCookie,
     };
   }
   if (typeof document === 'undefined') return; // Node 里跑测试时到此为止
@@ -268,7 +280,9 @@
   const REPO = 'https://github.com/rockbenben/feishu-lark-batch-export';
   const API = '/space/api';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const csrf = () => (document.cookie.match(/_csrf_token=([^;]+)/) || [])[1] || '';
+
+  // 取错这个 cookie 的症状是「文档能列出来、一篇也导不出」：列表全是 GET，不带这个头。
+  const csrf = () => readCookie(document.cookie, '_csrf_token');
 
   // ── 文案 ──
   // 默认跟随浏览器语言（chrome.i18n）。手动指定语言时只能自己把 messages.json 读进来
@@ -282,18 +296,27 @@
     if (MSG && MSG[key]) {
       return String(MSG[key].message).replace(/\$(\d)/g, (_, n) => String(subs[n - 1] ?? ''));
     }
-    return (typeof chrome !== 'undefined' && chrome.i18n
-      && chrome.i18n.getMessage(key, subs.map(String))) || key;
+    // 扩展被重新加载后（手动重载，或商店版静默自动更新），已打开的页面里这份 content
+    // script 的 context 已失效，chrome.i18n.getMessage 会抛 Extension context
+    // invalidated。取不到文案就退回 key：界面难看一点，但这函数还用在拼错误消息上，
+    // 让它抛等于错误处理本身也会炸，正在跑的队列会每一篇都报这个。
+    try {
+      return (typeof chrome !== 'undefined' && chrome.i18n
+        && chrome.i18n.getMessage(key, subs.map(String))) || key;
+    } catch (e) { return key; }
   }
 
   function loadLocale(lang) {
     if (!LANGS.includes(lang)) { MSG = null; return Promise.resolve(); }
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'fbe-locale', lang }, (res) => {
-        void chrome.runtime.lastError; // service worker 没起来时别往控制台喷
-        MSG = res || null;             // 读不到就退回浏览器语言，别把界面变成一堆 key
-        resolve();
-      });
+      // 同上：context 失效时 sendMessage 直接抛，不是走 lastError。
+      try {
+        chrome.runtime.sendMessage({ type: 'fbe-locale', lang }, (res) => {
+          void chrome.runtime.lastError; // service worker 没起来时别往控制台喷
+          MSG = res || null;             // 读不到就退回浏览器语言，别把界面变成一堆 key
+          resolve();
+        });
+      } catch (e) { MSG = null; resolve(); }
     });
   }
 
@@ -312,7 +335,13 @@
       }
       x.onload = () => {
         try { resolve(JSON.parse(x.responseText)); }
-        catch (e) { reject(new Error(t('errNotJson', x.status))); }
+        catch (e) {
+          // 带上响应体。业务错误是 HTTP 200 + JSON 里的 code，走不到这儿；
+          // 走到这儿说明被网关挡了，而理由只写在这段纯文本里（比如 csrf token error）。
+          // 光报状态码的话，权限、CSRF、限频看上去一模一样。
+          reject(new Error(t('errNotJson', x.status,
+            (x.responseText || '').replace(/\s+/g, ' ').trim().slice(0, 200))));
+        }
       };
       x.onerror = () => reject(new Error(t('errNetwork')));
       x.send(body ? JSON.stringify(body) : null);
