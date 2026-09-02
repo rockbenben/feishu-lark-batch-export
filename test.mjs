@@ -12,8 +12,32 @@ const {
   pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot,
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
   descendantEnd, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
-  withExt, formatSize,
+  withExt, formatSize, readCookie,
 } = mod.exports;
+
+test('readCookie: 按 cookie 名精确匹配，不被同后缀的名字骗到', () => {
+  // 线上就栽在这里：原来是 document.cookie.match(/_csrf_token=([^;]+)/)，而
+  // `_csrf_token=` 是 `passport_csrf_token=` 的后缀，飞书页面上后者就在。子串匹配取到
+  // 它的值，/export/create/ 一律 403 csrf token error；列文档是 GET、不带这个头，
+  // 所以现象是「能列出来、一篇也导不出」。
+  const real = 'a1b2c3d4';
+  assert.equal(readCookie(`passport_csrf_token=WRONG; _csrf_token=${real}`, '_csrf_token'), real);
+  assert.equal(readCookie(`_csrf_token=${real}; passport_csrf_token=WRONG`, '_csrf_token'), real);
+  assert.equal(readCookie('swp_csrf_token=WRONG; x_csrf_token=WRONG', '_csrf_token'), '',
+    '没有就返回空串，绝不能退回一个别人的值 —— 那会发出一个注定 403 的请求');
+});
+
+test('readCookie: 边界不出怪话', () => {
+  assert.equal(readCookie('', '_csrf_token'), '');
+  assert.equal(readCookie(undefined, '_csrf_token'), '');
+  assert.equal(readCookie('_csrf_token=', '_csrf_token'), '', '空值等于没有');
+  assert.equal(readCookie('=orphan', '_csrf_token'), '', '没有名字的段落跳过，不能崩');
+  // 值里的 = 不能被截断（base64 的 padding）
+  assert.equal(readCookie('_csrf_token=YWJjZA==', '_csrf_token'), 'YWJjZA==');
+  // 分隔符后面没空格也认，前后空白要去掉
+  assert.equal(readCookie('a=1;_csrf_token=v;b=2', '_csrf_token'), 'v');
+  assert.equal(readCookie('a=1;   _csrf_token=v   ', '_csrf_token'), 'v');
+});
 
 test('withExt: 标题已经带着目标扩展名就不再加一遍', () => {
   assert.equal(withExt('文案套路', 'md'), '文案套路.md');

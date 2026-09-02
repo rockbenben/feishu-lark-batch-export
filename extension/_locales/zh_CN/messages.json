@@ -60,7 +60,7 @@
   "listFailed":     { "message": "✗  $1" },
   "emptyFailed":    { "message": "没列出来。确认这篇文档你打得开，或者换个来源再试。" },
   "errNotWiki":     { "message": "这不是知识库文档页。先打开一篇知识库文档，或者把来源换成云空间" },
-  "errNotJson":     { "message": "HTTP $1，返回的不是 JSON" },
+  "errNotJson":     { "message": "HTTP $1，返回的不是 JSON：$2" },
   "errNetwork":     { "message": "网络不通" },
   "errReadNode":    { "message": "读不到这个节点：$1" },
   "errReadChildren":{ "message": "读不到子节点：$1" },

@@ -60,7 +60,7 @@
   "listFailed":     { "message": "✗  $1" },
   "emptyFailed":    { "message": "Nothing listed. Check you can open this document, or try the other source." },
   "errNotWiki":     { "message": "This isn't a wiki document page. Open one, or switch the source to Drive" },
-  "errNotJson":     { "message": "HTTP $1, and the response wasn't JSON" },
+  "errNotJson":     { "message": "HTTP $1, and the response wasn't JSON: $2" },
   "errNetwork":     { "message": "No network" },
   "errReadNode":    { "message": "Could not read this node: $1" },
   "errReadChildren":{ "message": "Could not read child nodes: $1" },

@@ -48,6 +48,19 @@ Lark 侧复验结论：`/space/api/...` 路径、返回结构、虚拟根返回 
 | 云空间子目录 | `GET /space/api/explorer/v3/children/list/?token={folderToken}` |
 | md 内图片 | md 里是 `![Image](https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/authcode/?code=…)`。**跨域**，需要 `host_permissions`；**必须 `withCredentials=false`**（带 cookie 会被 CORS 拒）；code 里的 `…_1785871142:1785957542_V3` 是有效期，**约 24 小时**后失效 |
 
+**`x-csrftoken` 必须按 cookie 名精确取。** 飞书页面上同时存在 `passport_csrf_token`
+（字节的 passport 用的，跟云文档无关），而 `_csrf_token=` 正好是它的后缀 —— 拿
+`document.cookie.match(/_csrf_token=([^;]+)/)` 在整条 cookie 串上找子串会命中它，
+把无关的值当成 CSRF token 发出去，`/export/create/` 一律 **403 + 纯文本
+`csrf token error`**（不是 JSON，所以连错误码都没有）。
+
+这个 bug 的现象容易误判成权限问题：**文档列得出来、一篇也导不出**。因为列表全是 GET，
+不带 `x-csrftoken`，只有建导出任务这一个请求会用到它。`readCookie` 因此是纯函数并由
+`test.mjs` 覆盖，回归测试直接用 `passport_csrf_token` 排在前面的真实 cookie 串复现。
+
+顺带：**响应体要带进错误消息**。业务错误是 HTTP 200 + JSON 里的 `code`，能干净捕获；
+被网关挡掉时理由只写在那段纯文本里，只报状态码的话权限、CSRF、限频看上去一模一样。
+
 空间根节点：从当前 `wiki_token` 沿 `parent_wiki_token` 一路往上爬到没有父节点为止。
 
 云空间接口的三个坑（2026-08-05 实测）：
