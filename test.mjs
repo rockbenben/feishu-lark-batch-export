@@ -23,6 +23,9 @@ test('readCookie: 按 cookie 名精确匹配，不被同后缀的名字骗到', 
   const real = 'a1b2c3d4';
   assert.equal(readCookie(`passport_csrf_token=WRONG; _csrf_token=${real}`, '_csrf_token'), real);
   assert.equal(readCookie(`_csrf_token=${real}; passport_csrf_token=WRONG`, '_csrf_token'), real);
+  // 撞车的不止 passport 一个：维护者自己的飞书页面上就带着 swp_csrf_token，同样以
+  // _csrf_token 结尾。他一直没中招，只是排序侥幸把真的那个排在了前面。
+  assert.equal(readCookie(`swp_csrf_token=WRONG; _csrf_token=${real}`, '_csrf_token'), real);
   assert.equal(readCookie('swp_csrf_token=WRONG; x_csrf_token=WRONG', '_csrf_token'), '',
     '没有就返回空串，绝不能退回一个别人的值 —— 那会发出一个注定 403 的请求');
 });
