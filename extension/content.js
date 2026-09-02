@@ -296,18 +296,27 @@
     if (MSG && MSG[key]) {
       return String(MSG[key].message).replace(/\$(\d)/g, (_, n) => String(subs[n - 1] ?? ''));
     }
-    return (typeof chrome !== 'undefined' && chrome.i18n
-      && chrome.i18n.getMessage(key, subs.map(String))) || key;
+    // 扩展被重新加载后（手动重载，或商店版静默自动更新），已打开的页面里这份 content
+    // script 的 context 已失效，chrome.i18n.getMessage 会抛 Extension context
+    // invalidated。取不到文案就退回 key：界面难看一点，但这函数还用在拼错误消息上，
+    // 让它抛等于错误处理本身也会炸，正在跑的队列会每一篇都报这个。
+    try {
+      return (typeof chrome !== 'undefined' && chrome.i18n
+        && chrome.i18n.getMessage(key, subs.map(String))) || key;
+    } catch (e) { return key; }
   }
 
   function loadLocale(lang) {
     if (!LANGS.includes(lang)) { MSG = null; return Promise.resolve(); }
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'fbe-locale', lang }, (res) => {
-        void chrome.runtime.lastError; // service worker 没起来时别往控制台喷
-        MSG = res || null;             // 读不到就退回浏览器语言，别把界面变成一堆 key
-        resolve();
-      });
+      // 同上：context 失效时 sendMessage 直接抛，不是走 lastError。
+      try {
+        chrome.runtime.sendMessage({ type: 'fbe-locale', lang }, (res) => {
+          void chrome.runtime.lastError; // service worker 没起来时别往控制台喷
+          MSG = res || null;             // 读不到就退回浏览器语言，别把界面变成一堆 key
+          resolve();
+        });
+      } catch (e) { MSG = null; resolve(); }
     });
   }
 
