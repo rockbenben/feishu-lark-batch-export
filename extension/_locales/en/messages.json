@@ -58,6 +58,7 @@
   "untitled":       { "message": "(untitled)" },
   "listExpanded":   { "message": "Expanded $1 folders" },
   "listDone":       { "message": "Listed $1 items, $2 of them folders" },
+  "listSkipped":    { "message": "$1 folder(s) couldn't be opened and were skipped — everything else still exports: $2" },
   "listFailed":     { "message": "✗  $1" },
   "emptyFailed":    { "message": "Nothing listed. Check you can open this document, or try the other source." },
   "errNotWiki":     { "message": "This isn't a wiki document page. Open one, or switch the source to Drive" },

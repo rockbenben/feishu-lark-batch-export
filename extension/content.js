@@ -671,7 +671,7 @@
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(out)); } catch (e) { /* 无痕模式等，忽略 */ }
   }
 
-  async function scanWiki(onFolder) {
+  async function scanWiki(onFolder, onSkip) {
     const token = wikiTokenFromPath(location.pathname);
     if (!token) {
       // 在 /wiki/ 下却取不到 token ⇒ 停在知识库首页或功能页，不是某一篇文档。
@@ -685,7 +685,11 @@
       const item = { node, children: [] };
       if (node.has_child) {
         onFolder();
-        for (const child of await getChildren(spaceId, node.wiki_token)) item.children.push(await walk(child));
+        let kids;
+        try {
+          kids = await getChildren(spaceId, node.wiki_token);
+        } catch (e) { onSkip(node, e); return item; }
+        for (const child of kids) item.children.push(await walk(child));
       }
       return item;
     };
@@ -696,12 +700,18 @@
   }
 
   // 云空间往下一层永远是同一个接口，所以两个云空间来源共用这个递归。
-  function driveWalker(onFolder) {
+  // onSkip：某个子文件夹列不开时回调。共享文件夹里各子目录权限可能不一致，
+  // 一个打不开就把整棵树清零不对 —— 导出队列对单篇失败也是跳过继续，扫描同理。
+  // 起点（顶层）列不开不在这儿兜底：那说明整个来源就不可用，该直接报错。
+  function driveWalker(onFolder, onSkip) {
     const walk = async (node) => {
       const item = { node, children: [] };
       if (node.has_child) {
         onFolder();
-        const kids = await driveList('children/list/', `&token=${node.wiki_token}`);
+        let kids;
+        try {
+          kids = await driveList('children/list/', `&token=${node.wiki_token}`);
+        } catch (e) { onSkip(node, e); return item; }
         for (const child of kids) item.children.push(await walk(asNode(child)));
       }
       return item;
@@ -709,8 +719,8 @@
     return walk;
   }
 
-  async function scanDrive(onFolder) {
-    const walk = driveWalker(onFolder);
+  async function scanDrive(onFolder, onSkip) {
+    const walk = driveWalker(onFolder, onSkip);
     // 根目录的文件夹和文档分两个接口，合起来才是完整的一层
     const roots = [
       ...await driveList('my_space/folder/'),
@@ -725,10 +735,10 @@
   // my_space 那个来源只看你自己空间的根，别人分享给你的文件夹（哪怕你是管理员）
   // 压根不在里面，所以没有这个来源就没法导出共享文件夹。
   // 顶层直接用这个文件夹的子项：文件夹本身是导出的起点，不是要导的文档。
-  async function scanFolder(onFolder) {
+  async function scanFolder(onFolder, onSkip) {
     const token = driveFolderTokenFromPath(location.pathname);
     if (!token) throw new Error(t('errNotFolder'));
-    const walk = driveWalker(onFolder);
+    const walk = driveWalker(onFolder, onSkip);
     const items = [];
     for (const n of await driveList('children/list/', `&token=${token}`)) {
       items.push(await walk(asNode(n)));
@@ -745,12 +755,17 @@
     try {
       let folders = 0;
       const onFolder = () => { if (++folders % 10 === 0) showEmpty(t('listExpanded', folders)); };
+      // 子文件夹打不开只跳过它那棵子树，名字记下来列完报给用户 —— 备份工具最怕
+      // 静默缺一块，也不能因为一块没权限就整块都不给。
+      const skips = [];
+      const onSkip = (node, e) => skips.push(`${node.title}: ${e.message}`);
       const src = $('fbe-src').value;
       const scanner = src === 'drive' ? scanDrive : (src === 'folder' ? scanFolder : scanWiki);
-      const items = await scanner(onFolder);
+      const items = await scanner(onFolder, onSkip);
       rows = flatten(items);
       renderTree();
       log(t('listDone', rows.length, folders));
+      if (skips.length) log(t('listSkipped', skips.length, skips.slice(0, 5).join('; ')));
     } catch (e) {
       rows = [];
       renderTree();

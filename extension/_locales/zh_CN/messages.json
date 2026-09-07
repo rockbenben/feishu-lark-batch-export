@@ -58,6 +58,7 @@
   "untitled":       { "message": "（无标题）" },
   "listExpanded":   { "message": "已展开 $1 个目录" },
   "listDone":       { "message": "列出 $1 项，其中 $2 个目录" },
+  "listSkipped":    { "message": "另有 $1 个文件夹打不开、已跳过，其余内容不受影响：$2" },
   "listFailed":     { "message": "✗  $1" },
   "emptyFailed":    { "message": "没列出来。确认这篇文档你打得开，或者换个来源再试。" },
   "errNotWiki":     { "message": "这不是知识库文档页。先打开一篇知识库文档，或者把来源换成云空间" },
