@@ -12,7 +12,7 @@ const {
   pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot,
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
   descendantEnd, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
-  withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath,
+  withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
 } = mod.exports;
 
 test('driveFolderTokenFromPath: 认出「我正在看的文件夹」', () => {
@@ -25,6 +25,18 @@ test('driveFolderTokenFromPath: 认出「我正在看的文件夹」', () => {
   assert.equal(driveFolderTokenFromPath('/wiki/wikcnAbC123'), null, '知识库文档不是文件夹');
   assert.equal(driveFolderTokenFromPath(''), null);
   assert.equal(driveFolderTokenFromPath(undefined), null);
+});
+
+test('sourceForPath: 来源跟着页面走；知识库首页也算 wiki，文件夹页算 folder', () => {
+  // 飞书是 pushState 单页应用，站内跳转不重载内容脚本，这个函数在每次打开面板时重算。
+  // /wiki/ 宽匹配是故意的：停在知识库首页时也要选中 wiki，才轮得到 errWikiNotDoc
+  // 那句「点开任意一篇文档」的提示。
+  assert.equal(sourceForPath('/wiki/space/7123456789'), 'wiki', '知识库首页宽匹配到 wiki');
+  assert.equal(sourceForPath('/wiki/wikcnAbC123?sheet_index=0'), 'wiki');
+  assert.equal(sourceForPath('/drive/folder/fldcn123?from=space'), 'folder');
+  assert.equal(sourceForPath('/drive/home/'), 'drive');
+  assert.equal(sourceForPath(''), 'drive');
+  assert.equal(sourceForPath(undefined), 'drive');
 });
 
 test('wikiTokenFromPath: 知识库首页不是文档页，`space` 不能当成 token', () => {

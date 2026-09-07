@@ -143,6 +143,17 @@
     return m ? m[1] : null;
   }
 
+  // 当前页面该默认选哪个来源。飞书是 pushState 单页应用，站内跳转不重载内容脚本，
+  // 所以每次打开面板都要按当前 URL 重算，不能只在建面板时算一次 —— 否则从云空间
+  // 首页点进别人分享的文件夹后，下拉还停在「我的云空间」，列出来的全是自己的东西。
+  // /wiki/ 这里故意用宽匹配（不用 wikiTokenFromPath）：停在知识库首页时也选中 wiki，
+  // 用户才能拿到那句「点开任意一篇文档」的提示，默默切到云空间反而把人带偏。
+  function sourceForPath(pathname) {
+    if (/\/wiki\//.test(pathname)) return 'wiki';
+    if (driveFolderTokenFromPath(pathname)) return 'folder';
+    return 'drive';
+  }
+
   // 小于 1 MB 时显示 KB。几个 md 文件本来就到不了 1 MB，
   // 报「0.0 MB」看着像是什么都没导出来。单位不用翻译。
   function formatSize(bytes) {
@@ -297,7 +308,7 @@
       pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot, TYPES,
       crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem, descendantEnd,
       buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, formatSize, readCookie,
-      wikiTokenFromPath, driveFolderTokenFromPath,
+      wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
     };
   }
   if (typeof document === 'undefined') return; // Node 里跑测试时到此为止
@@ -498,6 +509,9 @@
   let failed = [];
   let stopped = false;
   let running = false;
+  // 上次成功列出的是哪个页面。打开面板时落在目标明确的页面（知识库文档页/文件夹页）
+  // 就自动列一次，同一页面不重复列；「我的云空间」意图不明确，不自动跑。
+  let listedFor = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -677,7 +691,8 @@
       // 在 /wiki/ 下却取不到 token ⇒ 停在知识库首页或功能页，不是某一篇文档。
       // 这两种情况该做的下一步不同，别混成一句话。
       if (/\/wiki\//.test(location.pathname)) throw new Error(t('errWikiNotDoc'));
-      throw new Error(t('errNotWiki'));
+      const right = sourceForPath(location.pathname) === 'folder' ? t('srcFolder') : t('srcDrive');
+      throw new Error(t('errNotWiki', right));
     }
 
     const { spaceId, rootToken, rootNode } = await findSpaceRoot(token, getNode);
@@ -737,7 +752,10 @@
   // 顶层直接用这个文件夹的子项：文件夹本身是导出的起点，不是要导的文档。
   async function scanFolder(onFolder, onSkip) {
     const token = driveFolderTokenFromPath(location.pathname);
-    if (!token) throw new Error(t('errNotFolder'));
+    if (!token) {
+      const right = sourceForPath(location.pathname) === 'wiki' ? t('srcWiki') : t('srcDrive');
+      throw new Error(t('errNotFolder', right));
+    }
     const walk = driveWalker(onFolder, onSkip);
     const items = [];
     for (const n of await driveList('children/list/', `&token=${token}`)) {
@@ -759,10 +777,22 @@
       // 静默缺一块，也不能因为一块没权限就整块都不给。
       const skips = [];
       const onSkip = (node, e) => skips.push(`${node.title}: ${e.message}`);
-      const src = $('fbe-src').value;
+      const srcSel = $('fbe-src');
+      let src = srcSel.value;
+      // 面板开着时站内跳转不会重算下拉，点「列出文档」时再兜一次：选的是 wiki/folder
+      // 而当前页面根本不匹配，这两种是必错（drive 任何页面都能用，不拦），就切到当前
+      // 页面对应的来源。下拉同步过去，日志说一声 —— 让人看到跑的就是显示的那个。
+      const matched = sourceForPath(location.pathname);
+      if ((src === 'wiki' && matched !== 'wiki') || (src === 'folder' && matched !== 'folder')) {
+        src = matched;
+        srcSel.value = matched;
+        const name = matched === 'wiki' ? t('srcWiki') : matched === 'folder' ? t('srcFolder') : t('srcDrive');
+        log(t('srcAutoSwitched', name));
+      }
       const scanner = src === 'drive' ? scanDrive : (src === 'folder' ? scanFolder : scanWiki);
       const items = await scanner(onFolder, onSkip);
       rows = flatten(items);
+      listedFor = location.pathname;
       renderTree();
       log(t('listDone', rows.length, folders));
       if (skips.length) log(t('listSkipped', skips.length, skips.slice(0, 5).join('; ')));
@@ -998,6 +1028,14 @@
     // 键盘用户就得从整个飞书页面顶部重新 Tab 回来。关闭时再还给 fab。
     const open = () => {
       fab.hidden = true; panel.hidden = false;
+      // 站内跳转不重载脚本，打开时重算一次，来源才真的「跟着页面走」
+      const src = sourceForPath(location.pathname);
+      $('fbe-src').value = src;
+      // 落在知识库文档页或文件夹页这种目标明确的页面上，打开就直接列出文档，省一次点击；
+      // 知识库首页（src=wiki 但 URL 取不到 token）和「我的云空间」意图不明，不自动跑。
+      // 同一页面不重复列，导出进行中也不跑。scan 自带 try/catch，这里不 await。
+      const concrete = src === 'folder' || (src === 'wiki' && wikiTokenFromPath(location.pathname));
+      if (concrete && !running && listedFor !== location.pathname) scan();
       $('fbe-src').focus();
     };
     const close = () => {
@@ -1022,11 +1060,8 @@
     $('fbe-scan').onclick = scan;
     $('fbe-q').oninput = applyFilter;
     $('fbe-since').onchange = (e) => selectRecent(Number(e.target.value));
-    // 来源跟着当前页面走：/wiki/ 上扫知识库，文件夹页上扫这个文件夹，其余扫我的云空间。
-    // /wiki/ 这里仍用宽匹配 —— 停在知识库首页时选中 wiki 才能拿到那句「点开任意一篇
-    // 文档」的提示，默默切到云空间反而把人带偏。
-    $('fbe-src').value = /\/wiki\//.test(location.pathname) ? 'wiki'
-      : (driveFolderTokenFromPath(location.pathname) ? 'folder' : 'drive');
+    // 来源跟着当前页面走（首次打开；之后每次 open 都会按当前 URL 重算）
+    $('fbe-src').value = sourceForPath(location.pathname);
     loadSettings();
     SETTING_IDS.forEach((id) => { $(id).addEventListener('change', saveSettings); });
     $('fbe-all').onchange = (e) => {
