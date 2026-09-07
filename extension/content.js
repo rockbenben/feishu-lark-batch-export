@@ -53,9 +53,13 @@
   // title/obj_type/wiki_token。在这里归一，后面整条流水线就不用管来源了。
   // type 编号跟 wiki 的 obj_type 是同一套，文件夹是 0（子文件夹）或 4（空间根）。
   const isFolder = (n) => n.type === 0 || n.type === 4;
+  // obj_token 缺失时退回 token：JSON.stringify 会把值为 undefined 的键整个丢掉，
+  // 于是 /export/create/ 收到一个没有 token 的请求体，回 1002 no permission ——
+  // 看起来像权限问题，其实是我们没把文档标识发过去。退回 token 未必对，但一定
+  // 好过什么都不发；真发错了飞书会明确报错，而不是静默导出别的东西。
   const asNode = (n) => ({
     title: n.name,
-    obj_token: n.obj_token,
+    obj_token: n.obj_token || n.token,
     obj_type: n.type,
     wiki_token: n.token,
     has_child: isFolder(n),
@@ -115,6 +119,28 @@
       if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
     }
     return '';
+  }
+
+  // /wiki/ 后面不一定是节点 token。知识库首页是 /wiki/space/<space_id>，还有
+  // /wiki/settings/… 这类功能页 —— 直接取第一段会把 `space` 当成 wiki_token 发给
+  // get_node，接口报错，表现是「我对这个知识库有权限，却一篇也列不出来」。
+  // 打开别人的知识库时落地页往往正是空间首页，所以这条路径很常见。
+  const WIKI_RESERVED = new Set([
+    'space', 'spaces', 'settings', 'setting', 'recent', 'favorite', 'favorites',
+    'trash', 'search', 'home', 'template', 'templates', 'shared', 'wiki',
+  ]);
+
+  // 返回节点 token；停在知识库的非文档页时返回 null。
+  function wikiTokenFromPath(pathname) {
+    const m = String(pathname == null ? '' : pathname).match(/\/wiki\/([A-Za-z0-9]+)/);
+    if (!m) return null;
+    return WIKI_RESERVED.has(m[1].toLowerCase()) ? null : m[1];
+  }
+
+  // 云空间文件夹页：/drive/folder/<token>。不在文件夹页上时返回 null。
+  function driveFolderTokenFromPath(pathname) {
+    const m = String(pathname == null ? '' : pathname).match(/\/drive\/folder\/([A-Za-z0-9]+)/);
+    return m ? m[1] : null;
   }
 
   // 小于 1 MB 时显示 KB。几个 md 文件本来就到不了 1 MB，
@@ -271,6 +297,7 @@
       pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot, TYPES,
       crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem, descendantEnd,
       buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, formatSize, readCookie,
+      wikiTokenFromPath, driveFolderTokenFromPath,
     };
   }
   if (typeof document === 'undefined') return; // Node 里跑测试时到此为止
@@ -645,10 +672,15 @@
   }
 
   async function scanWiki(onFolder) {
-    const match = location.pathname.match(/\/wiki\/([A-Za-z0-9]+)/);
-    if (!match) throw new Error(t('errNotWiki'));
+    const token = wikiTokenFromPath(location.pathname);
+    if (!token) {
+      // 在 /wiki/ 下却取不到 token ⇒ 停在知识库首页或功能页，不是某一篇文档。
+      // 这两种情况该做的下一步不同，别混成一句话。
+      if (/\/wiki\//.test(location.pathname)) throw new Error(t('errWikiNotDoc'));
+      throw new Error(t('errNotWiki'));
+    }
 
-    const { spaceId, rootToken, rootNode } = await findSpaceRoot(match[1], getNode);
+    const { spaceId, rootToken, rootNode } = await findSpaceRoot(token, getNode);
     const walk = async (node) => {
       const item = { node, children: [] };
       if (node.has_child) {
@@ -663,7 +695,8 @@
     return items;
   }
 
-  async function scanDrive(onFolder) {
+  // 云空间往下一层永远是同一个接口，所以两个云空间来源共用这个递归。
+  function driveWalker(onFolder) {
     const walk = async (node) => {
       const item = { node, children: [] };
       if (node.has_child) {
@@ -673,6 +706,11 @@
       }
       return item;
     };
+    return walk;
+  }
+
+  async function scanDrive(onFolder) {
+    const walk = driveWalker(onFolder);
     // 根目录的文件夹和文档分两个接口，合起来才是完整的一层
     const roots = [
       ...await driveList('my_space/folder/'),
@@ -680,6 +718,21 @@
     ];
     const items = [];
     for (const n of roots) items.push(await walk(asNode(n)));
+    return items;
+  }
+
+  // 我正在看的这个文件夹。跟知识库那个来源对称 —— 都从你当前所在的位置往下扫。
+  // my_space 那个来源只看你自己空间的根，别人分享给你的文件夹（哪怕你是管理员）
+  // 压根不在里面，所以没有这个来源就没法导出共享文件夹。
+  // 顶层直接用这个文件夹的子项：文件夹本身是导出的起点，不是要导的文档。
+  async function scanFolder(onFolder) {
+    const token = driveFolderTokenFromPath(location.pathname);
+    if (!token) throw new Error(t('errNotFolder'));
+    const walk = driveWalker(onFolder);
+    const items = [];
+    for (const n of await driveList('children/list/', `&token=${token}`)) {
+      items.push(await walk(asNode(n)));
+    }
     return items;
   }
 
@@ -692,7 +745,9 @@
     try {
       let folders = 0;
       const onFolder = () => { if (++folders % 10 === 0) showEmpty(t('listExpanded', folders)); };
-      const items = $('fbe-src').value === 'drive' ? await scanDrive(onFolder) : await scanWiki(onFolder);
+      const src = $('fbe-src').value;
+      const scanner = src === 'drive' ? scanDrive : (src === 'folder' ? scanFolder : scanWiki);
+      const items = await scanner(onFolder);
       rows = flatten(items);
       renderTree();
       log(t('listDone', rows.length, folders));
@@ -861,6 +916,7 @@
       <div class="fbe-row fbe-row--find">
         <select id="fbe-src" title="${t('srcTip')}">
           <option value="wiki">${t('srcWiki')}</option>
+          <option value="folder">${t('srcFolder')}</option>
           <option value="drive">${t('srcDrive')}</option>
         </select>
         <button id="fbe-scan" class="fbe-btn">${t('listDocs')}</button>
@@ -951,8 +1007,11 @@
     $('fbe-scan').onclick = scan;
     $('fbe-q').oninput = applyFilter;
     $('fbe-since').onchange = (e) => selectRecent(Number(e.target.value));
-    // 来源跟着当前页面走：在 /wiki/ 上默认扫知识库，其它页面默认扫云空间
-    $('fbe-src').value = /\/wiki\//.test(location.pathname) ? 'wiki' : 'drive';
+    // 来源跟着当前页面走：/wiki/ 上扫知识库，文件夹页上扫这个文件夹，其余扫我的云空间。
+    // /wiki/ 这里仍用宽匹配 —— 停在知识库首页时选中 wiki 才能拿到那句「点开任意一篇
+    // 文档」的提示，默默切到云空间反而把人带偏。
+    $('fbe-src').value = /\/wiki\//.test(location.pathname) ? 'wiki'
+      : (driveFolderTokenFromPath(location.pathname) ? 'folder' : 'drive');
     loadSettings();
     SETTING_IDS.forEach((id) => { $(id).addEventListener('change', saveSettings); });
     $('fbe-all').onchange = (e) => {

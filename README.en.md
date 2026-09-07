@@ -41,7 +41,8 @@ The corner button is **draggable** and remembers where you put it — that corne
 Pick a source and hit **List documents**. The source follows the page you're on:
 
 - **The wiki I'm viewing** — climbs from the open document to the space root and pulls the whole tree. Needs a `/wiki/xxx` page.
-- **My drive** — everything that isn't in a wiki. Works on any page.
+- **The folder I'm viewing** — walks everything under the folder you're looking at. Needs a `/drive/folder/xxx` page. **Use this for folders shared with you** — they don't live under your own space root, so the source below can't see them.
+- **My drive** — everything under your own space root. Works on any page.
 
 **2 Check the ones you want**
 

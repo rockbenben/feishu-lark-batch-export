@@ -12,8 +12,39 @@ const {
   pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot,
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
   descendantEnd, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
-  withExt, formatSize, readCookie,
+  withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath,
 } = mod.exports;
+
+test('driveFolderTokenFromPath: 认出「我正在看的文件夹」', () => {
+  // 别人分享给你的文件夹不在你自己空间的根下，my_space 那两个接口扫不到它，
+  // 只能从当前 URL 里取 token 再走 children/list/
+  assert.equal(driveFolderTokenFromPath('/drive/folder/fldcnExampleFolderToken'),
+    'fldcnExampleFolderToken');
+  assert.equal(driveFolderTokenFromPath('/drive/folder/fldcn123?from=space'), 'fldcn123');
+  assert.equal(driveFolderTokenFromPath('/drive/home/'), null, '云空间首页不是某个文件夹');
+  assert.equal(driveFolderTokenFromPath('/wiki/wikcnAbC123'), null, '知识库文档不是文件夹');
+  assert.equal(driveFolderTokenFromPath(''), null);
+  assert.equal(driveFolderTokenFromPath(undefined), null);
+});
+
+test('wikiTokenFromPath: 知识库首页不是文档页，`space` 不能当成 token', () => {
+  // 打开别人的知识库时落地页往往是空间首页。原来的 /\/wiki\/([A-Za-z0-9]+)/ 会取到
+  // 字符串 space 并拿它去 get_node，接口报错 —— 表现是「我有权限却一篇也列不出来」。
+  assert.equal(wikiTokenFromPath('/wiki/space/7123456789'), null);
+  assert.equal(wikiTokenFromPath('/wiki/settings/7123456789'), null);
+  assert.equal(wikiTokenFromPath('/wiki/recent'), null);
+  assert.equal(wikiTokenFromPath('/wiki/SPACE/7123'), null, '大小写不同也是保留段');
+});
+
+test('wikiTokenFromPath: 真正的文档页照样取得到', () => {
+  // 飞书的 wiki token 带 wikcn 前缀，Lark 的没有 —— 两边都得认
+  assert.equal(wikiTokenFromPath('/wiki/wikcnAbC123'), 'wikcnAbC123');
+  assert.equal(wikiTokenFromPath('/wiki/Ddv2dVdbLosqyWxKru0cziAQnjf'), 'Ddv2dVdbLosqyWxKru0cziAQnjf');
+  assert.equal(wikiTokenFromPath('/wiki/wikcnAbC123?sheet_index=0'), 'wikcnAbC123', '查询串不参与');
+  assert.equal(wikiTokenFromPath('/drive/folder/fldcn123'), null, '压根不在 /wiki/ 下');
+  assert.equal(wikiTokenFromPath(''), null);
+  assert.equal(wikiTokenFromPath(undefined), null);
+});
 
 test('readCookie: 按 cookie 名精确匹配，不被同后缀的名字骗到', () => {
   // 线上就栽在这里：原来是 document.cookie.match(/_csrf_token=([^;]+)/)，而
@@ -68,6 +99,17 @@ test('asNode: 把云空间节点归一成知识库节点的形状', () => {
   });
   // 归一之后 pickFormat 就能直接吃 —— 整条流水线不用管来源
   assert.deepEqual(pickFormat(asNode(drive).obj_type, 'md'), { api: 'docx', ext: 'md' });
+});
+
+test('asNode: obj_token 缺失时退回 token，不能留 undefined', () => {
+  // JSON.stringify 会把值为 undefined 的键整个丢掉，于是 /export/create/ 收到一个
+  // 没有 token 的请求体，飞书回 1002 no permission —— 看着像权限问题，其实是漏发了
+  const n = asNode({ name: '共享文档', type: 22, token: 'doxcnAbC123' });
+  assert.equal(n.obj_token, 'doxcnAbC123');
+  assert.ok(JSON.stringify({ token: n.obj_token }).includes('doxcnAbC123'),
+    'token 必须真的出现在请求体里');
+  assert.equal(JSON.stringify({ token: undefined }), '{}',
+    '这就是原来的行为：整个键消失，飞书那边等于没收到 token');
 });
 
 test('isFolder: 云空间里文件夹是 0（子文件夹）或 4（空间根）', () => {
