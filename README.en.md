@@ -49,6 +49,8 @@ The TXT option is only another input source. Its rows enter the same checklist a
 
 A direct `file` URL does not contain the original filename, so that attachment currently downloads under its unique ID. Attachments listed from a wiki, folder, or drive still keep their original names.
 
+The list carries no modification time, so the **Recently edited** selector (last 7 / 30 / 90 days) never matches TXT rows — check them manually. Wiki rows need a token-conversion call each, so listing a long list slows itself automatically (0.4 s per wiki row). If every single link fails to resolve, the result is an explicit error, not an empty success-looking list.
+
 **2 Check the ones you want**
 
 Checking a folder checks **everything under it**. **Alt-click** affects only that row — so "just the folder's own page" and "drop the folder, keep the children I picked" are each one click, with no mode to switch into first.
@@ -63,11 +65,11 @@ Types that can't be exported (mindnotes) are disabled outright — you're never 
 
 **More than one file is packed into a single zip** (`feishu-export-YYYY-MM-DD.zip`); a lone file downloads directly, so Chrome never asks you to allow multiple downloads. Hit **Stop** mid-run and whatever finished still gets packed.
 
-Each final product or attachment download may run for up to 120 seconds. Network errors and HTTP 408, 429, or 5xx responses retry up to twice with a one-second delay. Deterministic failures such as 401, 403, and 404 go straight to the failed list without another request; export-job creation and progress polling keep their existing behaviour. A final failure writes one log entry containing the source document or attachment URL.
+Each final product or attachment download may run for up to 120 seconds. Network errors and HTTP 408, 429, or 5xx responses retry up to twice: the delay is one second by default, or the server's `Retry-After` value when present (capped at 30 seconds). Deterministic failures such as 401, 403, and 404 go straight to the failed list without another request; export-job creation and progress polling keep their existing behaviour. A final failure writes one log entry containing the source document or attachment URL.
 
 The panel shows progress and a remaining-time estimate based on measured throughput, so a long run isn't a guessing game.
 
-Use the small button in the top-right of the log area to copy the complete log when reporting failed links or troubleshooting.
+Hover the log area and a Copy button appears in its top-right corner; when the log contains a failure line it stays visible — handy for copying the complete log when reporting failed links.
 
 **Start export** stays pinned to the bottom of the panel and the middle section scrolls — on a short laptop screen the primary action is never pushed out of sight.
 
@@ -86,7 +88,7 @@ Under **More settings**. The defaults aim at one thing: **mirror the wiki faithf
 
 Settings are remembered. Numbering **restarts inside each folder** when folder structure is on, so you never get a folder containing `007`, `019` — a flat export falls back to one global sequence.
 
-**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Each image request times out after 15 seconds and retries up to twice, waiting one second between attempts. Only a final failure adds one log entry with the image URL; the Markdown keeps the original link rather than rewriting it to something broken.
+**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Each image request times out after 15 seconds and retries up to twice, waiting one second between attempts. Only a final failure adds one log entry with the image URL; the Markdown keeps the original link rather than rewriting it to something broken. Same-titled documents in one batch (duplicate links guarantee this) get image folders with `-2`, `-3` suffixes so images never overwrite each other inside the zip.
 
 ## What it can export
 

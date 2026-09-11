@@ -16,7 +16,7 @@
 /* display 会盖掉 [hidden] 的 UA 样式，这几条必须在前面兜住 */
 #fbe-panel[hidden], #fbe-fab[hidden], #fbe-tree[hidden], #fbe-empty[hidden],
 #fbe-tree div[hidden], #fbe-progress[hidden], #fbe-log-wrap[hidden],
-#fbe-url-row[hidden], #fbe-url-file[hidden] { display: none }
+#fbe-url-row[hidden] { display: none }
 
 /* right/bottom 由 JS 设（可拖动、位置记住），这里只是 JS 跑起来之前的兜底值。
    touch-action:none 是 pointer 事件拖拽必需的，否则触屏上会被滚动手势抢走。 */
@@ -222,14 +222,23 @@
   border-radius: 2px; transition: width .25s ease }
 #fbe-progress-text { white-space: nowrap; font-variant-numeric: tabular-nums }
 
-/* 复制是日志自己的次要操作，收在窄工具条里，不跟导出主按钮抢层级 */
-#fbe-log-wrap { border-top: 1px solid var(--line); background: rgba(16, 28, 34, .035) }
-.fbe-log-tools { display: flex; justify-content: flex-end; padding: 5px 10px 0 }
+/* 复制是日志自己的次要操作，不跟导出主按钮抢层级：平时浮在右上角且完全隐身、
+   不占布局；悬停日志区或键盘聚焦时才浮现。日志里出现失败/跳过行（JS 给 wrap
+   加上 fbe-log-tools-on）后常驻 —— 反馈失败链接正是它唯一该被看到的场景。 */
+#fbe-log-wrap {
+  position: relative;
+  border-top: 1px solid var(--line); background: rgba(16, 28, 34, .035);
+}
+.fbe-log-tools { position: absolute; top: 4px; right: 8px; z-index: 1 }
 .fbe-log-copy {
   padding: 3px 7px; border: 1px solid var(--line); border-radius: 4px;
   background: #FBF9F5; color: var(--dim); cursor: pointer;
   font: 11px/1.2 var(--sans);
+  opacity: 0; transition: opacity .15s ease;
 }
+#fbe-log-wrap:hover .fbe-log-copy,
+#fbe-log-wrap.fbe-log-tools-on .fbe-log-copy,
+.fbe-log-copy:focus-visible { opacity: 1 }
 .fbe-log-copy:hover { background: #fff; border-color: rgba(16, 28, 34, .22); color: var(--text) }
 .fbe-log-copy:active { transform: translateY(1px) }
 .fbe-log-copy:disabled { opacity: .55; cursor: default }
@@ -240,6 +249,9 @@
   font: 11.5px/1.85 var(--mono); color: var(--text);
   white-space: pre-wrap; word-break: break-all;
 }
+/* 按钮浮在右上角：悬停或失败常驻时给第一行让出顶部，别让按钮压在文字上 */
+#fbe-log-wrap:hover #fbe-log,
+#fbe-log-wrap.fbe-log-tools-on #fbe-log { padding-top: 22px }
 
 /* 质量底线：可见的键盘焦点、尊重减少动效 */
 #fbe-panel :is(button, select, input, summary):focus-visible {

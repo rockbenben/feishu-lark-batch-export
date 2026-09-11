@@ -298,7 +298,11 @@
       try { return await task(); }
       catch (e) {
         if (attempt >= retryCount || !shouldRetry(e)) throw e;
-        await wait(delayMs);
+        // 429/503 响应若带了 Retry-After（delta 秒）就听服务端的，封顶 30 秒；
+        // 没有或不合法才用固定间隔，防网关/图床明确说了要等却还在 1 秒后撞上去。
+        const after = Number(e && e.retryAfterMs);
+        const delay = Number.isFinite(after) && after > 0 ? Math.min(after, 30000) : delayMs;
+        await wait(delay);
       }
     }
   }
@@ -318,6 +322,18 @@
     const ext = dot > 0 ? base.slice(dot) : '';
     for (let i = 2; ; i++) {
       const candidate = `${dir}${stem} (${i})${ext}`;
+      if (!used.has(candidate)) { used.add(candidate); return candidate; }
+    }
+  }
+
+  // 图片目录去重。不能复用 uniqueName：目录没有扩展名，而 uniqueName 会把最后一个 '.'
+  // 之后整段当扩展名（标题里的点很常见，如「v1.2 方案」），序号会插进名字中间。
+  // 同名文档（URL 列表刻意保留重复链接，这种情况必然出现）共用 assets 目录时，
+  // zip 里会出现重复条目，解压后一篇的图覆盖另一篇 —— 所以目录也必须唯一。
+  function uniqueDir(name, used) {
+    if (!used.has(name)) { used.add(name); return name; }
+    for (let i = 2; ; i++) {
+      const candidate = `${name}-${i}`;
       if (!used.has(candidate)) { used.add(candidate); return candidate; }
     }
   }
@@ -449,7 +465,7 @@
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
-      pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot, TYPES,
+      pickFormat, sanitizeName, uniqueName, uniqueDir, flatten, findSpaceRoot, TYPES,
       crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem, descendantEnd,
       buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, addTokenToFilename,
       formatSize, readCookie,
@@ -466,6 +482,8 @@
   const REPO = 'https://github.com/rockbenben/feishu-lark-batch-export';
   const API = '/space/api';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // URL 列表里每行 wiki 都要单独打一次 get_node，行与行之间留的间隔。
+  const URL_RESOLVE_DELAY_MS = 400;
 
   // 取错这个 cookie 的症状是「文档能列出来、一篇也导不出」：列表全是 GET，不带这个头。
   const csrf = () => readCookie(document.cookie, '_csrf_token');
@@ -569,8 +587,14 @@
       } catch (e) {
         log(appendSourceUrl(t('urlReadFailed', item.lineNumber, item.urlToken, e.message), item.url));
       }
+      // wiki 行每行都要打一次 get_node 做 token 转换；大批背靠背请求容易撞限频。
+      // 直解文档不发网络请求，不用等。失败也等 —— 限频往往正是失败原因。
+      if (item.kind === 'wiki') await sleep(URL_RESOLVE_DELAY_MS);
     }
     onProgress(parsed.items.length, parsed.items.length);
+    // 逐行错误前面已经报过；但一个都没读出来时不能走成功分支说「列出 0 个链接」，
+    // 那看起来像列表本来就是空的。
+    if (!roots.length) throw new Error(t('errUrlsAllFailed'));
     return roots;
   }
 
@@ -642,6 +666,11 @@
       const fail = (message, retryable) => {
         const error = new Error(message);
         error.retryable = retryable;
+        // Retry-After 只认 delta 秒（HTTP-date 形式飞书不用）；值非法就忽略。
+        if (retryable) {
+          const after = Number(x.getResponseHeader('Retry-After'));
+          if (Number.isFinite(after) && after > 0) error.retryAfterMs = Math.min(after, 30) * 1000;
+        }
         reject(error);
       };
       x.open('GET', url, true);
@@ -664,10 +693,10 @@
   }
 
   // 图片放在 md 同级的 assets/ 下，所以 md 里写的相对链接跟目录深度无关，
-  // 开不开「保留目录结构」都不用改写成 ../../ 那种东西。
-  async function localizeImages(md, stem, dirPrefix) {
+  // 开不开「保留目录结构」都不用改写成 ../../ 那种东西。dir 由调用方用
+  // uniqueDir 保证同批次唯一，重名文档不能共用一个图片目录。
+  async function localizeImages(md, dir, dirPrefix) {
     const urls = mdImageUrls(md);
-    const dir = safeSlug(stem);
     const mapping = {};   // url → md 里的相对链接
     const entries = [];
     for (const url of urls) {
@@ -715,10 +744,16 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // 失败/跳过行在两种语言里都以 ✗ 或 − 开头（见 _locales 的 itemFailed /
+  // urlInvalidLine 等）。出现这种行时让复制按钮常驻，普通的「列出 N 项」不值得一个按钮。
+  const LOG_TOOLS_ON_RE = /[✗−]/;
+
   function log(msg) {
     const el = $('fbe-log');
-    $('fbe-log-wrap').hidden = false; // 没话说的时候不占地方
+    const wrap = $('fbe-log-wrap');
+    wrap.hidden = false; // 没话说的时候不占地方
     el.textContent += (el.textContent ? '\n' : '') + msg;
+    if (LOG_TOOLS_ON_RE.test(msg)) wrap.classList.add('fbe-log-tools-on');
     el.scrollTop = el.scrollHeight;
   }
 
@@ -1002,6 +1037,7 @@
     button.disabled = true;
     $('fbe-log').textContent = '';
     $('fbe-log-wrap').hidden = true;
+    $('fbe-log-wrap').classList.remove('fbe-log-tools-on');
     showEmpty(t('listing'));
     try {
       let folders = 0;
@@ -1075,6 +1111,7 @@
     const keepTree = $('fbe-dirs').checked;
     const needComment = $('fbe-comment').checked;
     const used = new Set();
+    const usedImgDirs = new Set();
     const seq = new Map();
     const startedAt = Date.now();
     const files = [];   // {path, blob, crc, size}
@@ -1108,7 +1145,10 @@
         );
 
         if (withImages && result.ext === 'md') {
-          const localized = await localizeImages(await blob.text(), stem, dirPrefix);
+          // 目录在去重后的集合上分配：同名的两篇文档（或同一链接出现两次）
+          // 不能落到同一个 assets 子目录，否则 zip 条目互相覆盖、图片串台。
+          const imgDir = uniqueDir(safeSlug(stem), usedImgDirs);
+          const localized = await localizeImages(await blob.text(), imgDir, dirPrefix);
           files.push(await toEntry(name, new Blob([localized.md], { type: 'text/markdown' })));
           files.push(...localized.entries);
           log(localized.entries.length ? t('okWithImages', name, localized.entries.length) : t('okPlain', name));
@@ -1388,6 +1428,7 @@
 
     $('fbe-log').textContent = logText;
     $('fbe-log-wrap').hidden = !logText;
+    $('fbe-log-wrap').classList.toggle('fbe-log-tools-on', LOG_TOOLS_ON_RE.test(logText));
     $('fbe-q').value = query;
     $('fbe-src').value = source;
     updateSourceControls();

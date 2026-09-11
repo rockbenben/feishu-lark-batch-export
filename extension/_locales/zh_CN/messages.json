@@ -84,6 +84,7 @@
   "errReadDrive":   { "message": "读不到云空间：$1" },
   "errNoUrlFile":   { "message": "请先选择一个 TXT 文件" },
   "errNoValidUrl":  { "message": "TXT 里没有可用的文档链接" },
+  "errUrlsAllFailed": { "message": "没有一个链接能读取（逐行原因见上方日志）" },
   "errUrlInvalid":  { "message": "不是有效 URL" },
   "errUrlProtocol": { "message": "只接受 HTTPS 链接" },
   "errUrlOrigin":   { "message": "链接不是当前飞书站点" },

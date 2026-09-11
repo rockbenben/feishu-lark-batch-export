@@ -84,6 +84,7 @@
   "errReadDrive":   { "message": "Could not read the drive: $1" },
   "errNoUrlFile":   { "message": "Choose a TXT file first" },
   "errNoValidUrl":  { "message": "The TXT file contains no usable document links" },
+  "errUrlsAllFailed": { "message": "None of the links could be read (per-line reasons are logged above)" },
   "errUrlInvalid":  { "message": "Not a valid URL" },
   "errUrlProtocol": { "message": "Only HTTPS links are accepted" },
   "errUrlOrigin":   { "message": "Link is not from the current Feishu site" },

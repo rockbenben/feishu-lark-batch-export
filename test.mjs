@@ -9,7 +9,7 @@ const src = readFileSync(new URL('./extension/content.js', import.meta.url), 'ut
 const mod = { exports: {} };
 new Function('module', src)(mod);
 const {
-  pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot,
+  pickFormat, sanitizeName, uniqueName, uniqueDir, flatten, findSpaceRoot,
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
   descendantEnd, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
   withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
@@ -323,6 +323,54 @@ test('retryAsync: 不可重试错误立即抛出', async () => {
   );
   assert.equal(attempts, 1);
   assert.deepEqual(waits, []);
+});
+
+test('retryAsync: 错误带 retryAfterMs（Retry-After 响应头）时按服务端节奏等待', async () => {
+  const waits = [];
+  let attempts = 0;
+  await assert.rejects(
+    retryAsync(
+      async () => {
+        attempts++;
+        const error = new Error('HTTP 429');
+        error.retryable = true;
+        error.retryAfterMs = 2500;
+        throw error;
+      },
+      1,
+      async (ms) => { waits.push(ms); },
+      1000,
+      (error) => error.retryable === true,
+    ),
+    /HTTP 429/,
+  );
+  assert.equal(attempts, 2);
+  assert.deepEqual(waits, [2500]);
+});
+
+test('retryAsync: 非法 retryAfterMs 回退到固定间隔，且服务端值封顶 30 秒', async () => {
+  const waitFor = async (retryAfterMs) => {
+    const waits = [];
+    await assert.rejects(
+      retryAsync(
+        async () => {
+          const error = new Error('HTTP 503');
+          error.retryable = true;
+          error.retryAfterMs = retryAfterMs;
+          throw error;
+        },
+        1,
+        async (ms) => { waits.push(ms); await Promise.resolve(); },
+        1000,
+        (error) => error.retryable === true,
+      ),
+      /HTTP 503/,
+    );
+    return waits[0];
+  };
+  assert.equal(await waitFor(0), 1000);
+  assert.equal(await waitFor(undefined), 1000);
+  assert.equal(await waitFor(120000), 30000);
 });
 
 test('asNode: 把云空间节点归一成知识库节点的形状', () => {
@@ -697,6 +745,20 @@ test('uniqueName: 重名追加序号且保留扩展名', () => {
   assert.equal(uniqueName('a.md', used), 'a (3).md');
   assert.equal(uniqueName('无后缀', used), '无后缀');
   assert.equal(uniqueName('无后缀', used), '无后缀 (2)');
+});
+
+test('uniqueDir: 同名图片目录整段追加序号，不把标题里的点当扩展名', () => {
+  const used = new Set();
+  assert.equal(uniqueDir('笔记', used), '笔记');
+  assert.equal(uniqueDir('笔记', used), '笔记-2');
+  assert.equal(uniqueDir('笔记', used), '笔记-3');
+  // 复用 uniqueName 会从最后一个 '.' 切开，序号插进名字中间 —— 目录没有扩展名，必须整段加
+  assert.equal(uniqueDir('v1.2 方案', used), 'v1.2 方案');
+  assert.equal(uniqueDir('v1.2 方案', used), 'v1.2 方案-2');
+  // -2 这个名字已被占用时继续往后找，不能交出一个已存在目录
+  used.add('季度报告');
+  used.add('季度报告-2');
+  assert.equal(uniqueDir('季度报告', used), '季度报告-3');
 });
 
 test('flatten: 深度优先，后代是紧随其后 depth 更大的连续一段', () => {
