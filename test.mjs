@@ -13,6 +13,9 @@ const {
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
   descendantEnd, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
   withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
+  parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
+  addTokenToFilename,
+  normalizeExportResult, titleFromExportResult,
 } = mod.exports;
 
 test('driveFolderTokenFromPath: 认出「我正在看的文件夹」', () => {
@@ -58,6 +61,88 @@ test('wikiTokenFromPath: 真正的文档页照样取得到', () => {
   assert.equal(wikiTokenFromPath(undefined), null);
 });
 
+test('parseDocumentUrl: 解析同域云文档并保留完整 URL', () => {
+  assert.deepEqual(
+    parseDocumentUrl(
+      'https://acme.feishu.cn/docx/DoxExample123?from=copy#heading',
+      'https://acme.feishu.cn',
+    ),
+    {
+      url: 'https://acme.feishu.cn/docx/DoxExample123?from=copy#heading',
+      kind: 'docx', urlToken: 'DoxExample123', objType: 22,
+    },
+  );
+  assert.equal(
+    parseDocumentUrl(
+      'https://acme.feishu.cn/wiki/WikiExample123/',
+      'https://acme.feishu.cn',
+    ).objType,
+    null,
+  );
+  assert.equal(
+    parseDocumentUrl('https://acme.feishu.cn/docs/LegacyDoc123', 'https://acme.feishu.cn').objType,
+    2,
+  );
+});
+
+test('parseDocumentUrl: 拒绝不安全、跨域和不支持的链接', () => {
+  const origin = 'https://acme.feishu.cn';
+  assert.throws(() => parseDocumentUrl('javascript:alert(1)', origin), /protocol/);
+  assert.throws(() => parseDocumentUrl('https://other.feishu.cn/docx/ABC', origin), /origin/);
+  assert.throws(() => parseDocumentUrl(`${origin}/sheets/ABC`, origin), /path/);
+  assert.throws(() => parseDocumentUrl(`${origin}/drive/folder/ABC`, origin), /path/);
+  assert.throws(() => parseDocumentUrl(`${origin}/docx/`, origin), /path/);
+});
+
+test('parseUrlText: 忽略空行但保留重复 URL 和原始行号', () => {
+  const parsed = parseUrlText(
+    '\uFEFFhttps://acme.feishu.cn/docx/A?x=1\r\n'
+      + '\r\n'
+      + '  https://acme.feishu.cn/docx/A?x=1  \r\n'
+      + 'not-a-url\r\n',
+    'https://acme.feishu.cn',
+  );
+  assert.deepEqual(parsed.items.map((x) => x.lineNumber), [1, 3]);
+  assert.deepEqual(parsed.items.map((x) => x.urlToken), ['A', 'A']);
+  assert.deepEqual(parsed.errors.map((x) => [x.lineNumber, x.reason]), [[4, 'invalid']]);
+});
+
+test('buildDirectNode: 普通文档使用 URL token 且保留导出字段', () => {
+  assert.deepEqual(buildDirectNode({ urlToken: 'DoxToken', objType: 22 }), {
+    title: 'DoxToken', obj_token: 'DoxToken', obj_type: 22,
+    wiki_token: 'DoxToken', url_token: 'DoxToken', has_child: false, edit_time: 0,
+  });
+});
+
+test('resolveUrlItem: 普通文档直接生成节点，不调用 wiki token 转换接口', async () => {
+  let networkCalls = 0;
+  const node = await resolveUrlItem(
+    { kind: 'docx', urlToken: 'DoxToken', objType: 22 },
+    async () => { networkCalls++; throw new Error('不应调用'); },
+  );
+  assert.equal(networkCalls, 0);
+  assert.deepEqual(node, {
+    title: 'DoxToken', obj_token: 'DoxToken', obj_type: 22,
+    wiki_token: 'DoxToken', url_token: 'DoxToken', has_child: false, edit_time: 0,
+  });
+});
+
+test('resolveUrlItem: 知识库链接仍转换 wiki token', async () => {
+  const requested = [];
+  const node = await resolveUrlItem(
+    { kind: 'wiki', urlToken: 'WikiToken' },
+    async (token) => {
+      requested.push(token);
+      return { title: '知识库文档', obj_token: 'DoxToken', obj_type: 22, has_child: true };
+    },
+  );
+  assert.deepEqual(requested, ['WikiToken']);
+  assert.deepEqual(node, {
+    title: '知识库文档', obj_token: 'DoxToken', obj_type: 22,
+    url_token: 'WikiToken', has_child: false,
+  });
+});
+
 test('readCookie: 按 cookie 名精确匹配，不被同后缀的名字骗到', () => {
   // 线上就栽在这里：原来是 document.cookie.match(/_csrf_token=([^;]+)/)，而
   // `_csrf_token=` 是 `passport_csrf_token=` 的后缀，飞书页面上后者就在。子串匹配取到
@@ -93,6 +178,36 @@ test('withExt: 标题已经带着目标扩展名就不再加一遍', () => {
   assert.equal(withExt('年报.docx', 'pdf'), '年报.docx.pdf', '扩展名不同就该加');
 });
 
+test('addTokenToFilename: 开关打开时把完整 token 插在扩展名前', () => {
+  assert.equal(addTokenToFilename('标题.md', 'DoxToken', false), '标题.md');
+  assert.equal(addTokenToFilename('标题.md', 'DoxToken', true), '标题-DoxToken.md');
+  assert.equal(addTokenToFilename('报告.pdf', 'FileToken', true), '报告-FileToken.pdf');
+  assert.equal(addTokenToFilename('无后缀', 'FileToken', true), '无后缀-FileToken');
+  assert.equal(addTokenToFilename('README.MD', 'DoxToken', true), 'README-DoxToken.MD');
+});
+
+test('addTokenToFilename: token 已是标题时不重复，长标题让位给完整 token', () => {
+  assert.equal(addTokenToFilename('DoxToken.md', 'DoxToken', true), 'DoxToken.md');
+  assert.equal(addTokenToFilename('001-DoxToken.md', 'DoxToken', true), '001-DoxToken.md');
+  const name = addTokenToFilename(`${'很长'.repeat(40)}.md`, 'DoxToken123456', true);
+  assert.equal(name.endsWith('-DoxToken123456.md'), true);
+  assert.equal(name.slice(0, -3).length, 80, '文件名主干（含 token）仍保持最多 80 字符');
+});
+
+test('normalizeExportResult: 使用导出结果中的真实文件名，缺失时允许调用方回退', () => {
+  assert.deepEqual(normalizeExportResult({
+    file_token: 'ExportFileToken', file_extension: 'md', file_name: '真实标题.md',
+  }, 'pdf'), {
+    fileToken: 'ExportFileToken', ext: 'md', fileName: '真实标题.md',
+  });
+  assert.deepEqual(normalizeExportResult({ file_token: 'ExportFileToken' }, 'pdf'), {
+    fileToken: 'ExportFileToken', ext: 'pdf', fileName: '',
+  });
+  assert.equal(titleFromExportResult('列表兜底标题', '真实标题.md', 'md'), '真实标题');
+  assert.equal(titleFromExportResult('列表兜底标题', '真实标题', 'md'), '真实标题');
+  assert.equal(titleFromExportResult('列表兜底标题', '', 'md'), '列表兜底标题');
+});
+
 test('formatSize: 小体积不报 0.0 MB', () => {
   assert.equal(formatSize(512), '512 B');
   assert.equal(formatSize(4096), '4 KB');
@@ -110,7 +225,7 @@ test('asNode: 把云空间节点归一成知识库节点的形状', () => {
   };
   assert.deepEqual(asNode(drive), {
     title: '365 开源计划', obj_token: 'Q9kAdvXY3oqr', obj_type: 22,
-    wiki_token: 'nodxxx', has_child: false, edit_time: 1784289526,
+    wiki_token: 'nodxxx', url_token: 'Q9kAdvXY3oqr', has_child: false, edit_time: 1784289526,
   });
   // 归一之后 pickFormat 就能直接吃 —— 整条流水线不用管来源
   assert.deepEqual(pickFormat(asNode(drive).obj_type, 'md'), { api: 'docx', ext: 'md' });

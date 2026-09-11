@@ -8,7 +8,7 @@
 
 <img src="assets/panel-en.png" width="380" align="right" alt="The panel: list a wiki, check documents, export">
 
-Works on **wikis** and **drive** documents, on Feishu and Lark alike. Exports Markdown, Word or PDF; more than one file is packed automatically, with the folder structure preserved.
+Works on **wikis**, **drive**, and **URL list (TXT)** input, on Feishu and Lark alike. Exports Markdown, Word or PDF; more than one file is packed automatically, with the folder structure preserved.
 
 **Images are saved alongside** — not a nicety: in Feishu's exported Markdown, images are signed URLs that **expire in about 24 hours**. Leave them and your backup is text-only within days.
 
@@ -43,6 +43,9 @@ Pick a source and hit **List documents** (on a wiki document or folder page, ope
 - **This wiki** — climbs from the open document to the space root and pulls the whole tree. Needs a `/wiki/xxx` page.
 - **This folder** — walks everything under the folder you're looking at. Needs a `/drive/folder/xxx` page. **Use this for folders shared with you** — they don't live under your own space root, so the source below can't see them.
 - **My drive** — everything under your own space root. Works on any page.
+- **URL list (TXT)** — choose a `.txt` file containing one URL per line. Links must belong to the Feishu / Lark site currently open. Wiki plus new and legacy doc links are supported; blank lines are ignored and duplicates keep their original order.
+
+The TXT option is only another input source. Its rows enter the same checklist and reuse the existing export, download, image-localisation, and zip flow. Direct document links provide their type and unique ID locally, so listing does not open every document page; wiki links still use the existing API to convert a wiki token into the underlying document token. Direct documents are shown by unique ID until export. After a successful export, the filename prefers the real title returned by Feishu's export result. The existing export request verifies actual read/download permission for each row. Missing or inaccessible documents are logged without stopping the rest.
 
 **2 Check the ones you want**
 
@@ -73,6 +76,7 @@ Under **More settings**. The defaults aim at one thing: **mirror the wiki faithf
 | Save comments too | off | Most people want the body text — but discussion threads often hold conclusions that live nowhere else |
 | Number filenames | off | Clean `Title.md` wins. Turn it on to preserve the wiki's ordering |
 | Prefix parent folder | off | Redundant while folder structure is on. For flat exports that need disambiguating |
+| Add unique document ID to filename | off | Adds the document's unique ID to the exported filename, such as `Title-doxcnAbC123.md` |
 
 Settings are remembered. Numbering **restarts inside each folder** when folder structure is on, so you never get a folder containing `007`, `019` — a flat export falls back to one global sequence.
 
@@ -120,7 +124,7 @@ Since Chrome 138, injecting user scripts needs the separate **userScripts** perm
 node --test test.mjs
 ```
 
-Tests evaluate `extension/content.js` directly, so there is **no build step and no second copy of the logic to drift**. They cover format mapping, filename sanitising and deduplication, tree flattening, space-root discovery, the hand-written zip container, drive-node normalisation, and both locale files (same keys, same placeholder counts, every key referenced by code or manifest exists, no hardcoded Chinese left in the UI, store fields within Chrome's length limits).
+Tests evaluate `extension/content.js` directly, so there is **no build step and no second copy of the logic to drift**. They cover format mapping, URL-list parsing and node conversion, export-result filename normalisation, filename sanitising and unique-ID suffixes, collision handling, tree flattening, space-root discovery, the hand-written zip container, drive-node normalisation, and both locale files (same keys, same placeholder counts, every key referenced by code or manifest exists, no hardcoded Chinese left in the UI, store fields within Chrome's length limits).
 
 The i18n checks were mutation-tested — a key was deleted and a placeholder dropped on purpose to confirm the tests actually go red. Otherwise "all green" might just mean they check nothing.
 
