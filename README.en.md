@@ -63,6 +63,8 @@ Types that can't be exported (mindnotes) are disabled outright — you're never 
 
 **More than one file is packed into a single zip** (`feishu-export-YYYY-MM-DD.zip`); a lone file downloads directly, so Chrome never asks you to allow multiple downloads. Hit **Stop** mid-run and whatever finished still gets packed.
 
+Each final product or attachment download may run for up to 120 seconds. Network errors and HTTP 408, 429, or 5xx responses retry up to twice with a one-second delay. Deterministic failures such as 401, 403, and 404 go straight to the failed list without another request; export-job creation and progress polling keep their existing behaviour. A final failure writes one log entry containing the source document or attachment URL.
+
 The panel shows progress and a remaining-time estimate based on measured throughput, so a long run isn't a guessing game.
 
 Use the small button in the top-right of the log area to copy the complete log when reporting failed links or troubleshooting.
@@ -84,7 +86,7 @@ Under **More settings**. The defaults aim at one thing: **mirror the wiki faithf
 
 Settings are remembered. Numbering **restarts inside each folder** when folder structure is on, so you never get a folder containing `007`, `019` — a flat export falls back to one global sequence.
 
-**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Images that can't be fetched keep their original link and get a line in the log; the link is never rewritten to something broken.
+**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Each image request times out after 15 seconds and retries up to twice, waiting one second between attempts. Only a final failure adds one log entry with the image URL; the Markdown keeps the original link rather than rewriting it to something broken.
 
 ## What it can export
 
@@ -128,7 +130,7 @@ Since Chrome 138, injecting user scripts needs the separate **userScripts** perm
 node --test test.mjs
 ```
 
-Tests evaluate `extension/content.js` directly, so there is **no build step and no second copy of the logic to drift**. They cover format mapping, URL-list parsing and node conversion, export-result filename normalisation, filename sanitising and unique-ID suffixes, collision handling, tree flattening, space-root discovery, the hand-written zip container, drive-node normalisation, and both locale files (same keys, same placeholder counts, every key referenced by code or manifest exists, no hardcoded Chinese left in the UI, store fields within Chrome's length limits).
+Tests evaluate `extension/content.js` directly, so there is **no build step and no second copy of the logic to drift**. They cover format mapping, URL-list parsing and node conversion, export-result filename normalisation, filename sanitising and unique-ID suffixes, log copying and source links, image retries, product-download retry classification, collision handling, tree flattening, space-root discovery, the hand-written zip container, drive-node normalisation, and both locale files (same keys, same placeholder counts, every key referenced by code or manifest exists, no hardcoded Chinese left in the UI, store fields within Chrome's length limits).
 
 The i18n checks were mutation-tested — a key was deleted and a placeholder dropped on purpose to confirm the tests actually go red. Otherwise "all green" might just mean they check nothing.
 

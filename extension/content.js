@@ -25,6 +25,11 @@
     docx: 22, docs: 2, sheets: 3, base: 8, file: 12,
   });
 
+  const DRIVE_URL_PATHS = Object.freeze({
+    0: 'drive/folder', 4: 'drive/folder',
+    2: 'docs', 22: 'docx', 3: 'sheets', 8: 'base', 12: 'file',
+  });
+
   // 返回 {api, ext} / {api:null} 表示直下附件 / null 表示不支持。
   // want 不在该类型支持范围内时退回该类型的默认扩展名（例如选了 md 却遇到表格 → xlsx）。
   function pickFormat(objType, want) {
@@ -63,15 +68,35 @@
   // 于是 /export/create/ 收到一个没有 token 的请求体，回 1002 no permission ——
   // 看起来像权限问题，其实是我们没把文档标识发过去。退回 token 未必对，但一定
   // 好过什么都不发；真发错了飞书会明确报错，而不是静默导出别的东西。
-  const asNode = (n) => ({
-    title: n.name,
-    obj_token: n.obj_token || n.token,
-    obj_type: n.type,
-    wiki_token: n.token,
-    url_token: n.obj_token || n.token,
-    has_child: isFolder(n),
-    edit_time: Number(n.edit_time) || 0,
-  });
+  function sourceUrlForNode(origin, node, source) {
+    const existing = String((node && node.source_url) || '').trim();
+    if (existing) return existing;
+    const base = String(origin || '').replace(/\/+$/, '');
+    const objType = node && (node.obj_type ?? node.type);
+    const path = source === 'wiki' ? 'wiki' : DRIVE_URL_PATHS[objType];
+    const token = source === 'wiki'
+      ? node && node.wiki_token
+      : objType === 0 || objType === 4
+        ? node && (node.token || node.wiki_token)
+        : node && (node.url_token || node.obj_token || node.token);
+    return base && path && /^[A-Za-z0-9]+$/.test(String(token || ''))
+      ? `${base}/${path}/${token}`
+      : '';
+  }
+
+  function asNode(n, origin = '') {
+    const node = {
+      title: n.name,
+      obj_token: n.obj_token || n.token,
+      obj_type: n.type,
+      wiki_token: n.token,
+      url_token: n.obj_token || n.token,
+      has_child: isFolder(n),
+      edit_time: Number(n.edit_time) || 0,
+    };
+    const sourceUrl = sourceUrlForNode(origin, n, 'drive');
+    return sourceUrl ? { ...node, source_url: sourceUrl } : node;
+  }
 
   // 知识库节点把修改时间放在 detail_info 里，云空间节点直接在顶层。统一取秒。
   const editTime = (node) =>
@@ -268,6 +293,19 @@
     return source ? `${message} · ${source}` : message;
   }
 
+  async function retryAsync(task, retryCount, wait, delayMs, shouldRetry = () => true) {
+    for (let attempt = 0; ; attempt++) {
+      try { return await task(); }
+      catch (e) {
+        if (attempt >= retryCount || !shouldRetry(e)) throw e;
+        await wait(delayMs);
+      }
+    }
+  }
+
+  const isRetryableDownloadStatus = (status) =>
+    status === 0 || status === 408 || status === 429 || (status >= 500 && status < 600);
+
   // 同批次内重名时追加 (2)(3)…。只动最后一段的文件名 —— 带目录时若目录名里有点，
   // 直接找最后一个 '.' 会把后缀插进目录名里去。
   function uniqueName(name, used) {
@@ -417,7 +455,8 @@
       formatSize, readCookie,
       wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
       parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
-      normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl,
+      normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl, retryAsync,
+      isRetryableDownloadStatus, sourceUrlForNode,
     };
   }
   if (typeof document === 'undefined') return; // Node 里跑测试时到此为止
@@ -597,14 +636,23 @@
   }
 
   // 图片那些 authcode 链接实测必须 withCredentials=false —— 带 cookie 会被 CORS 拒。
-  function fetchBlob(url, withCredentials = true) {
+  function fetchBlob(url, withCredentials = true, timeoutMs = 0) {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
+      const fail = (message, retryable) => {
+        const error = new Error(message);
+        error.retryable = retryable;
+        reject(error);
+      };
       x.open('GET', url, true);
       x.withCredentials = withCredentials;
+      x.timeout = timeoutMs;
       x.responseType = 'blob';
-      x.onload = () => (x.status === 200 ? resolve(x.response) : reject(new Error(`HTTP ${x.status}`)));
-      x.onerror = () => reject(new Error(t('errNetwork')));
+      x.onload = () => (x.status === 200
+        ? resolve(x.response)
+        : fail(`HTTP ${x.status}`, isRetryableDownloadStatus(x.status)));
+      x.onerror = () => fail(t('errNetwork'), true);
+      x.ontimeout = () => fail(t('errNetwork'), true);
       x.send();
     });
   }
@@ -624,12 +672,18 @@
     const entries = [];
     for (const url of urls) {
       try {
-        const blob = await fetchBlob(url, false);
+        // 首次失败后再试两次；重试本身不写日志，三次都失败才由外层 catch 报一次。
+        const blob = await retryAsync(
+          () => fetchBlob(url, false, 15000),
+          2,
+          sleep,
+          1000,
+        );
         const rel = `assets/${dir}/${String(entries.length + 1).padStart(3, '0')}.${imageExt(blob.type)}`;
         mapping[url] = rel;
         entries.push(await toEntry(dirPrefix + rel, blob));
       } catch (e) {
-        log(t('imgFailed', e.message));
+        log(appendSourceUrl(t('imgFailed', e.message), url));
       }
     }
     return { md: rewriteImageLinks(md, mapping), entries };
@@ -869,7 +923,14 @@
 
     const { spaceId, rootToken, rootNode } = await findSpaceRoot(token, getNode);
     const walk = async (node) => {
-      const item = { node: { ...node, url_token: node.wiki_token }, children: [] };
+      const item = {
+        node: {
+          ...node,
+          url_token: node.wiki_token,
+          source_url: sourceUrlForNode(location.origin, node, 'wiki'),
+        },
+        children: [],
+      };
       if (node.has_child) {
         onFolder();
         let kids;
@@ -899,7 +960,7 @@
         try {
           kids = await driveList('children/list/', `&token=${node.wiki_token}`);
         } catch (e) { onSkip(node, e); return item; }
-        for (const child of kids) item.children.push(await walk(asNode(child)));
+        for (const child of kids) item.children.push(await walk(asNode(child, location.origin)));
       }
       return item;
     };
@@ -914,7 +975,7 @@
       ...await driveList('my_space/obj/'),
     ];
     const items = [];
-    for (const n of roots) items.push(await walk(asNode(n)));
+    for (const n of roots) items.push(await walk(asNode(n, location.origin)));
     return items;
   }
 
@@ -931,7 +992,7 @@
     const walk = driveWalker(onFolder, onSkip);
     const items = [];
     for (const n of await driveList('children/list/', `&token=${token}`)) {
-      items.push(await walk(asNode(n)));
+      items.push(await walk(asNode(n, location.origin)));
     }
     return items;
   }
@@ -1036,7 +1097,15 @@
         const plainName = withExt(stem, result.ext);
         const tokenName = addTokenToFilename(plainName, node.url_token, nameOpts.token);
         const name = uniqueName(dirPrefix + tokenName, used);
-        const blob = await fetchBlob(result.url);
+        // 最终产物和附件共用这个入口。只重试网络错误、408、429 与 5xx；
+        // 权限、链接不存在等确定性 4xx 立即失败，避免无意义等待。
+        const blob = await retryAsync(
+          () => fetchBlob(result.url, true, 120000),
+          2,
+          sleep,
+          1000,
+          (error) => error.retryable === true,
+        );
 
         if (withImages && result.ext === 'md') {
           const localized = await localizeImages(await blob.text(), stem, dirPrefix);

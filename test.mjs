@@ -13,9 +13,11 @@ const {
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
   descendantEnd, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
   withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
+  sourceUrlForNode,
   parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
   addTokenToFilename,
-  normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl,
+  normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl, retryAsync,
+  isRetryableDownloadStatus,
 } = mod.exports;
 
 test('driveFolderTokenFromPath: 认出「我正在看的文件夹」', () => {
@@ -255,6 +257,74 @@ test('appendSourceUrl: 在错误正文后追加来源链接', () => {
   assert.equal(appendSourceUrl('✗  原有来源失败', ''), '✗  原有来源失败');
 });
 
+test('retryAsync: 前两次失败后第三次成功，只在重试前等待', async () => {
+  let attempts = 0;
+  const waits = [];
+  const result = await retryAsync(
+    async () => {
+      attempts++;
+      if (attempts < 3) throw new Error(`第 ${attempts} 次失败`);
+      return '下载成功';
+    },
+    2,
+    async (ms) => { waits.push(ms); },
+    1000,
+  );
+  assert.equal(result, '下载成功');
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [1000, 1000]);
+});
+
+test('retryAsync: 用完两次重试后抛出最后一次错误', async () => {
+  let attempts = 0;
+  const waits = [];
+  await assert.rejects(
+    retryAsync(
+      async () => {
+        attempts++;
+        throw new Error(`最终错误 ${attempts}`);
+      },
+      2,
+      async (ms) => { waits.push(ms); },
+      1000,
+    ),
+    /最终错误 3/,
+  );
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [1000, 1000]);
+});
+
+test('isRetryableDownloadStatus: 只把临时下载故障判为可重试', () => {
+  for (const status of [0, 408, 429, 500, 503]) {
+    assert.equal(isRetryableDownloadStatus(status), true, `HTTP ${status} 应重试`);
+  }
+  for (const status of [200, 400, 401, 403, 404]) {
+    assert.equal(isRetryableDownloadStatus(status), false, `HTTP ${status} 不应重试`);
+  }
+});
+
+test('retryAsync: 不可重试错误立即抛出', async () => {
+  let attempts = 0;
+  const waits = [];
+  await assert.rejects(
+    retryAsync(
+      async () => {
+        attempts++;
+        const error = new Error('HTTP 403');
+        error.retryable = false;
+        throw error;
+      },
+      2,
+      async (ms) => { waits.push(ms); },
+      1000,
+      (error) => error.retryable === true,
+    ),
+    /HTTP 403/,
+  );
+  assert.equal(attempts, 1);
+  assert.deepEqual(waits, []);
+});
+
 test('asNode: 把云空间节点归一成知识库节点的形状', () => {
   // 云空间的字段叫 name/type/token，知识库叫 title/obj_type/wiki_token
   const drive = {
@@ -267,6 +337,36 @@ test('asNode: 把云空间节点归一成知识库节点的形状', () => {
   });
   // 归一之后 pickFormat 就能直接吃 —— 整条流水线不用管来源
   assert.deepEqual(pickFormat(asNode(drive).obj_type, 'md'), { api: 'docx', ext: 'md' });
+});
+
+test('sourceUrlForNode: 为知识库、云空间文档和文件夹生成可访问链接', () => {
+  const origin = 'https://acme.feishu.cn';
+  assert.equal(
+    sourceUrlForNode(origin, { wiki_token: 'WikiToken', obj_token: 'DocToken' }, 'wiki'),
+    `${origin}/wiki/WikiToken`,
+  );
+  assert.equal(
+    sourceUrlForNode(origin, { type: 22, obj_token: 'DocxToken' }, 'drive'),
+    `${origin}/docx/DocxToken`,
+  );
+  assert.equal(
+    sourceUrlForNode(origin, { type: 12, obj_token: 'FileToken' }, 'drive'),
+    `${origin}/file/FileToken`,
+  );
+  assert.equal(
+    sourceUrlForNode(origin, { type: 0, token: 'FolderToken' }, 'drive'),
+    `${origin}/drive/folder/FolderToken`,
+  );
+});
+
+test('asNode: 扫描云空间时把来源链接带入导出节点', () => {
+  assert.equal(
+    asNode(
+      { name: '附件', type: 12, token: 'NodeToken', obj_token: 'FileToken' },
+      'https://acme.feishu.cn',
+    ).source_url,
+    'https://acme.feishu.cn/file/FileToken',
+  );
 });
 
 test('asNode: obj_token 缺失时退回 token，不能留 undefined', () => {
