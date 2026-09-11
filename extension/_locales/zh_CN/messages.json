@@ -59,6 +59,9 @@
   "btnStart":       { "message": "开始导出" },
   "btnStop":        { "message": "停止" },
   "btnRetry":       { "message": "重试失败的 $1 篇" },
+  "copyLog":       { "message": "复制" },
+  "copyLogDone":   { "message": "已复制" },
+  "copyLogFailed": { "message": "复制失败" },
 
   "notExportable":  { "message": "$1不支持：它的 FreeMind 导出是飞书前端本地生成的，没有服务端接口可用" },
   "untitled":       { "message": "（无标题）" },

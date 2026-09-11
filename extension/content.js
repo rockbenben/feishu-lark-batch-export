@@ -22,7 +22,7 @@
   // 飞书标准分享页的第一段路径 -> obj_type。wiki 的 URL token 还要经 getNode
   // 转成真实 obj_token，所以不放在这张直接映射表里。
   const URL_TYPES = Object.freeze({
-    docx: 22, docs: 2,
+    docx: 22, docs: 2, sheets: 3, base: 8, file: 12,
   });
 
   // 返回 {api, ext} / {api:null} 表示直下附件 / null 表示不支持。
@@ -216,6 +216,7 @@
       obj_type: item.objType,
       wiki_token: item.urlToken,
       url_token: item.urlToken,
+      source_url: item.url,
       has_child: false,
       edit_time: 0,
     };
@@ -226,7 +227,7 @@
   async function resolveUrlItem(item, getWikiNode) {
     if (item.kind === 'wiki') {
       const node = await getWikiNode(item.urlToken);
-      return { ...node, url_token: item.urlToken, has_child: false };
+      return { ...node, url_token: item.urlToken, source_url: item.url, has_child: false };
     }
     return buildDirectNode(item);
   }
@@ -253,6 +254,18 @@
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
     return `${(bytes / 1048576).toFixed(1)} MB`;
+  }
+
+  async function copyLogText(text, writeText) {
+    const value = String(text == null ? '' : text);
+    if (!value) return false;
+    await writeText(value);
+    return true;
+  }
+
+  function appendSourceUrl(message, url) {
+    const source = String(url == null ? '' : url).trim();
+    return source ? `${message} · ${source}` : message;
   }
 
   // 同批次内重名时追加 (2)(3)…。只动最后一段的文件名 —— 带目录时若目录名里有点，
@@ -404,7 +417,7 @@
       formatSize, readCookie,
       wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
       parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
-      normalizeExportResult, titleFromExportResult,
+      normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl,
     };
   }
   if (typeof document === 'undefined') return; // Node 里跑测试时到此为止
@@ -503,7 +516,7 @@
   async function scanUrls(file, onProgress) {
     const parsed = parseUrlText(await file.text(), location.origin);
     for (const e of parsed.errors) {
-      log(t('urlInvalidLine', e.lineNumber, urlErrorText(e.reason)));
+      log(appendSourceUrl(t('urlInvalidLine', e.lineNumber, urlErrorText(e.reason)), e.raw));
     }
     if (!parsed.items.length) throw new Error(t('errNoValidUrl'));
 
@@ -515,7 +528,7 @@
         const node = await resolveUrlItem(item, getNode);
         roots.push({ node, children: [] });
       } catch (e) {
-        log(t('urlReadFailed', item.lineNumber, item.urlToken, e.message));
+        log(appendSourceUrl(t('urlReadFailed', item.lineNumber, item.urlToken, e.message), item.url));
       }
     }
     onProgress(parsed.items.length, parsed.items.length);
@@ -641,6 +654,7 @@
   let stopped = false;
   let running = false;
   let selectedUrlFile = null;
+  let copyFeedbackTimer = null;
   // 上次成功列出的是哪个页面。打开面板时落在目标明确的页面（知识库文档页/文件夹页）
   // 就自动列一次，同一页面不重复列；「我的云空间」意图不明确，不自动跑。
   let listedFor = null;
@@ -649,9 +663,33 @@
 
   function log(msg) {
     const el = $('fbe-log');
-    el.hidden = false; // 没话说的时候不占地方
+    $('fbe-log-wrap').hidden = false; // 没话说的时候不占地方
     el.textContent += (el.textContent ? '\n' : '') + msg;
     el.scrollTop = el.scrollHeight;
+  }
+
+  async function copyCurrentLog() {
+    const button = $('fbe-log-copy');
+    button.disabled = true;
+    clearTimeout(copyFeedbackTimer);
+    try {
+      const copied = await copyLogText(
+        $('fbe-log').textContent,
+        (text) => navigator.clipboard.writeText(text),
+      );
+      button.textContent = copied ? t('copyLogDone') : t('copyLogFailed');
+      button.title = button.textContent;
+    } catch (e) {
+      button.textContent = t('copyLogFailed');
+      button.title = `${t('copyLogFailed')}: ${e.message}`;
+    } finally {
+      button.disabled = false;
+      copyFeedbackTimer = setTimeout(() => {
+        if (!button.isConnected) return;
+        button.textContent = t('copyLog');
+        button.title = t('copyLog');
+      }, 1600);
+    }
   }
 
   function setProgress(done, total, elapsedMs) {
@@ -902,7 +940,7 @@
     const button = $('fbe-scan');
     button.disabled = true;
     $('fbe-log').textContent = '';
-    $('fbe-log').hidden = true;
+    $('fbe-log-wrap').hidden = true;
     showEmpty(t('listing'));
     try {
       let folders = 0;
@@ -986,7 +1024,10 @@
       setProgress(i, items.length, Date.now() - startedAt);
       try {
         const fmt = pickFormat(node.obj_type, want);
-        if (!fmt) { log(t('skipUnsupported', node.title, typeName(node.obj_type))); continue; }
+        if (!fmt) {
+          log(appendSourceUrl(t('skipUnsupported', node.title, typeName(node.obj_type)), node.source_url));
+          continue;
+        }
 
         const result = await exportOne(node, fmt, needComment);
         const dirPrefix = buildDirPrefix(path, keepTree);
@@ -1008,7 +1049,7 @@
         }
       } catch (e) {
         failed.push(items[i]);
-        log(t('itemFailed', node.title, e.message));
+        log(appendSourceUrl(t('itemFailed', node.title, e.message), node.source_url));
       }
       await sleep(1500); // 导出是服务端排队任务，别并发压它
     }
@@ -1186,7 +1227,13 @@
         <div class="track"><div id="fbe-progress-fill"></div></div>
         <span id="fbe-progress-text"></span>
       </div>
-      <pre id="fbe-log" hidden></pre>`;
+      <div id="fbe-log-wrap" hidden>
+        <div class="fbe-log-tools">
+          <button type="button" id="fbe-log-copy" class="fbe-log-copy"
+                  title="${t('copyLog')}">${t('copyLog')}</button>
+        </div>
+        <pre id="fbe-log"></pre>
+      </div>`;
 
     document.body.append(fab, panel);
 
@@ -1247,6 +1294,7 @@
     $('fbe-start').onclick = () => run(checkboxes().flatMap((c, i) => (c.checked ? [rows[i]] : [])));
     $('fbe-stop').onclick = () => { stopped = true; $('fbe-stop').disabled = true; };
     $('fbe-retry').onclick = () => run(failed.slice());
+    $('fbe-log-copy').onclick = copyCurrentLog;
     $('fbe-lang').onchange = async (e) => {
       await loadLocale(e.target.value);
       rebuildPanel();
@@ -1270,6 +1318,7 @@
     buildPanel();
 
     $('fbe-log').textContent = logText;
+    $('fbe-log-wrap').hidden = !logText;
     $('fbe-q').value = query;
     $('fbe-src').value = source;
     updateSourceControls();

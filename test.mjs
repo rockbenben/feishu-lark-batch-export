@@ -15,7 +15,7 @@ const {
   withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
   parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
   addTokenToFilename,
-  normalizeExportResult, titleFromExportResult,
+  normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl,
 } = mod.exports;
 
 test('driveFolderTokenFromPath: 认出「我正在看的文件夹」', () => {
@@ -85,11 +85,24 @@ test('parseDocumentUrl: 解析同域云文档并保留完整 URL', () => {
   );
 });
 
+test('parseDocumentUrl: 把表格、多维表格和附件 URL 映射到现有导出类型', () => {
+  const origin = 'https://acme.feishu.cn';
+  assert.deepEqual(parseDocumentUrl(`${origin}/sheets/SheetToken`, origin), {
+    url: `${origin}/sheets/SheetToken`, kind: 'sheets', urlToken: 'SheetToken', objType: 3,
+  });
+  assert.deepEqual(parseDocumentUrl(`${origin}/base/BaseToken`, origin), {
+    url: `${origin}/base/BaseToken`, kind: 'base', urlToken: 'BaseToken', objType: 8,
+  });
+  assert.deepEqual(parseDocumentUrl(`${origin}/file/FileToken`, origin), {
+    url: `${origin}/file/FileToken`, kind: 'file', urlToken: 'FileToken', objType: 12,
+  });
+});
+
 test('parseDocumentUrl: 拒绝不安全、跨域和不支持的链接', () => {
   const origin = 'https://acme.feishu.cn';
   assert.throws(() => parseDocumentUrl('javascript:alert(1)', origin), /protocol/);
   assert.throws(() => parseDocumentUrl('https://other.feishu.cn/docx/ABC', origin), /origin/);
-  assert.throws(() => parseDocumentUrl(`${origin}/sheets/ABC`, origin), /path/);
+  assert.throws(() => parseDocumentUrl(`${origin}/slides/ABC`, origin), /path/);
   assert.throws(() => parseDocumentUrl(`${origin}/drive/folder/ABC`, origin), /path/);
   assert.throws(() => parseDocumentUrl(`${origin}/docx/`, origin), /path/);
 });
@@ -105,32 +118,42 @@ test('parseUrlText: 忽略空行但保留重复 URL 和原始行号', () => {
   assert.deepEqual(parsed.items.map((x) => x.lineNumber), [1, 3]);
   assert.deepEqual(parsed.items.map((x) => x.urlToken), ['A', 'A']);
   assert.deepEqual(parsed.errors.map((x) => [x.lineNumber, x.reason]), [[4, 'invalid']]);
+  assert.equal(parsed.errors[0].raw, 'not-a-url');
 });
 
 test('buildDirectNode: 普通文档使用 URL token 且保留导出字段', () => {
-  assert.deepEqual(buildDirectNode({ urlToken: 'DoxToken', objType: 22 }), {
+  assert.deepEqual(buildDirectNode({
+    url: 'https://acme.feishu.cn/docx/DoxToken', urlToken: 'DoxToken', objType: 22,
+  }), {
     title: 'DoxToken', obj_token: 'DoxToken', obj_type: 22,
     wiki_token: 'DoxToken', url_token: 'DoxToken', has_child: false, edit_time: 0,
+    source_url: 'https://acme.feishu.cn/docx/DoxToken',
   });
 });
 
 test('resolveUrlItem: 普通文档直接生成节点，不调用 wiki token 转换接口', async () => {
   let networkCalls = 0;
   const node = await resolveUrlItem(
-    { kind: 'docx', urlToken: 'DoxToken', objType: 22 },
+    {
+      kind: 'docx', url: 'https://acme.feishu.cn/docx/DoxToken',
+      urlToken: 'DoxToken', objType: 22,
+    },
     async () => { networkCalls++; throw new Error('不应调用'); },
   );
   assert.equal(networkCalls, 0);
   assert.deepEqual(node, {
     title: 'DoxToken', obj_token: 'DoxToken', obj_type: 22,
     wiki_token: 'DoxToken', url_token: 'DoxToken', has_child: false, edit_time: 0,
+    source_url: 'https://acme.feishu.cn/docx/DoxToken',
   });
 });
 
 test('resolveUrlItem: 知识库链接仍转换 wiki token', async () => {
   const requested = [];
   const node = await resolveUrlItem(
-    { kind: 'wiki', urlToken: 'WikiToken' },
+    {
+      kind: 'wiki', url: 'https://acme.feishu.cn/wiki/WikiToken', urlToken: 'WikiToken',
+    },
     async (token) => {
       requested.push(token);
       return { title: '知识库文档', obj_token: 'DoxToken', obj_type: 22, has_child: true };
@@ -139,7 +162,7 @@ test('resolveUrlItem: 知识库链接仍转换 wiki token', async () => {
   assert.deepEqual(requested, ['WikiToken']);
   assert.deepEqual(node, {
     title: '知识库文档', obj_token: 'DoxToken', obj_type: 22,
-    url_token: 'WikiToken', has_child: false,
+    url_token: 'WikiToken', source_url: 'https://acme.feishu.cn/wiki/WikiToken', has_child: false,
   });
 });
 
@@ -215,6 +238,21 @@ test('formatSize: 小体积不报 0.0 MB', () => {
   assert.equal(formatSize(300 * 1024), '300 KB');
   assert.equal(formatSize(3 * 1048576), '3.0 MB');
   assert.equal(formatSize(12.34 * 1048576), '12.3 MB');
+});
+
+test('copyLogText: 完整复制多行日志', async () => {
+  const copied = [];
+  const result = await copyLogText('第一行\n✗ 第二行失败', async (text) => copied.push(text));
+  assert.equal(result, true);
+  assert.deepEqual(copied, ['第一行\n✗ 第二行失败']);
+});
+
+test('appendSourceUrl: 在错误正文后追加来源链接', () => {
+  assert.equal(
+    appendSourceUrl('−  第 18 行已跳过：不是支持的文档链接', 'https://acme.feishu.cn/sheets/ABC'),
+    '−  第 18 行已跳过：不是支持的文档链接 · https://acme.feishu.cn/sheets/ABC',
+  );
+  assert.equal(appendSourceUrl('✗  原有来源失败', ''), '✗  原有来源失败');
 });
 
 test('asNode: 把云空间节点归一成知识库节点的形状', () => {

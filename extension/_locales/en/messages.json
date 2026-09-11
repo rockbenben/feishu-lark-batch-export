@@ -59,6 +59,9 @@
   "btnStart":       { "message": "Start export" },
   "btnStop":        { "message": "Stop" },
   "btnRetry":       { "message": "Retry $1 that failed" },
+  "copyLog":       { "message": "Copy" },
+  "copyLogDone":   { "message": "Copied" },
+  "copyLogFailed": { "message": "Copy failed" },
 
   "notExportable":  { "message": "$1 isn't supported: its FreeMind export is generated in Feishu's own frontend — there is no server endpoint to call" },
   "untitled":       { "message": "(untitled)" },

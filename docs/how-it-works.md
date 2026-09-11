@@ -87,8 +87,11 @@ Lark 侧复验结论：`/space/api/...` 路径、返回结构、虚拟根返回 
 
 TXT 链接来源坚持只做输入适配，不复制导出逻辑：
 
-- 每个非空行解析为 `https://当前站点/<类型>/<token>`；当前只接受 `wiki`、`docx`、
-  `docs`。跨站点、非 HTTPS、未知路径和非法 token 逐行记日志并跳过，重复链接不去重。
+- 每个非空行解析为 `https://当前站点/<类型>/<token>`；当前接受 `wiki`、`docx`、
+  `docs`、`sheets`、`base`、`file`。后三者直接映射到已有的 `obj_type=3/8/12`，继续使用
+  表格导出、多维表格导出和附件直下逻辑。跨站点、非 HTTPS、未知路径和非法 token
+  逐行记日志并附上原始输入，随后跳过；
+  有效 URL 会保留在节点上，解析或导出失败时一并输出。重复链接不去重。
 - `/wiki/<wiki_token>` 必须调用现有 `get_node`，因为真正导出所需的是返回的
   `obj_token` 和 `obj_type`。这不是额外权限预检，而是 wiki token 到文档 token 的必要转换。
 - 普通文档路径直接得到 `obj_type` 和 URL token，不再逐篇访问网页；列表暂用 token 作标题，

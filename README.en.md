@@ -43,9 +43,11 @@ Pick a source and hit **List documents** (on a wiki document or folder page, ope
 - **This wiki** — climbs from the open document to the space root and pulls the whole tree. Needs a `/wiki/xxx` page.
 - **This folder** — walks everything under the folder you're looking at. Needs a `/drive/folder/xxx` page. **Use this for folders shared with you** — they don't live under your own space root, so the source below can't see them.
 - **My drive** — everything under your own space root. Works on any page.
-- **URL list (TXT)** — choose a `.txt` file containing one URL per line. Links must belong to the Feishu / Lark site currently open. Wiki plus new and legacy doc links are supported; blank lines are ignored and duplicates keep their original order.
+- **URL list (TXT)** — choose a `.txt` file containing one URL per line. Links must belong to the Feishu / Lark site currently open. Wiki, new and legacy docs, sheets, bitables, and file links are supported; blank lines are ignored and duplicates keep their original order.
 
-The TXT option is only another input source. Its rows enter the same checklist and reuse the existing export, download, image-localisation, and zip flow. Direct document links provide their type and unique ID locally, so listing does not open every document page; wiki links still use the existing API to convert a wiki token into the underlying document token. Direct documents are shown by unique ID until export. After a successful export, the filename prefers the real title returned by Feishu's export result. The existing export request verifies actual read/download permission for each row. Missing or inaccessible documents are logged without stopping the rest.
+The TXT option is only another input source. Its rows enter the same checklist and reuse the existing export, download, image-localisation, and zip flow. Direct document links provide their type and unique ID locally, so listing does not open every document page; wiki links still use the existing API to convert a wiki token into the underlying document token. Direct documents are shown by unique ID until export. After a successful export, the filename prefers the real title returned by Feishu's export result. The existing export request verifies actual read/download permission for each row. Missing, inaccessible, or malformed entries keep their corresponding link in the log without stopping the rest.
+
+A direct `file` URL does not contain the original filename, so that attachment currently downloads under its unique ID. Attachments listed from a wiki, folder, or drive still keep their original names.
 
 **2 Check the ones you want**
 
@@ -62,6 +64,8 @@ Types that can't be exported (mindnotes) are disabled outright — you're never 
 **More than one file is packed into a single zip** (`feishu-export-YYYY-MM-DD.zip`); a lone file downloads directly, so Chrome never asks you to allow multiple downloads. Hit **Stop** mid-run and whatever finished still gets packed.
 
 The panel shows progress and a remaining-time estimate based on measured throughput, so a long run isn't a guessing game.
+
+Use the small button in the top-right of the log area to copy the complete log when reporting failed links or troubleshooting.
 
 **Start export** stays pinned to the bottom of the panel and the middle section scrolls — on a short laptop screen the primary action is never pushed out of sight.
 
