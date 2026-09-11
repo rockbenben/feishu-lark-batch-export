@@ -19,6 +19,17 @@
     11: { key: 'typeMindnote', api: null,      exts: null }, // 飞书不给任何可用扩展名
   };
 
+  // 飞书标准分享页的第一段路径 -> obj_type。wiki 的 URL token 还要经 getNode
+  // 转成真实 obj_token，所以不放在这张直接映射表里。
+  const URL_TYPES = Object.freeze({
+    docx: 22, docs: 2, sheets: 3, base: 8, file: 12,
+  });
+
+  const DRIVE_URL_PATHS = Object.freeze({
+    0: 'drive/folder', 4: 'drive/folder',
+    2: 'docs', 22: 'docx', 3: 'sheets', 8: 'base', 12: 'file',
+  });
+
   // 返回 {api, ext} / {api:null} 表示直下附件 / null 表示不支持。
   // want 不在该类型支持范围内时退回该类型的默认扩展名（例如选了 md 却遇到表格 → xlsx）。
   function pickFormat(objType, want) {
@@ -57,14 +68,35 @@
   // 于是 /export/create/ 收到一个没有 token 的请求体，回 1002 no permission ——
   // 看起来像权限问题，其实是我们没把文档标识发过去。退回 token 未必对，但一定
   // 好过什么都不发；真发错了飞书会明确报错，而不是静默导出别的东西。
-  const asNode = (n) => ({
-    title: n.name,
-    obj_token: n.obj_token || n.token,
-    obj_type: n.type,
-    wiki_token: n.token,
-    has_child: isFolder(n),
-    edit_time: Number(n.edit_time) || 0,
-  });
+  function sourceUrlForNode(origin, node, source) {
+    const existing = String((node && node.source_url) || '').trim();
+    if (existing) return existing;
+    const base = String(origin || '').replace(/\/+$/, '');
+    const objType = node && (node.obj_type ?? node.type);
+    const path = source === 'wiki' ? 'wiki' : DRIVE_URL_PATHS[objType];
+    const token = source === 'wiki'
+      ? node && node.wiki_token
+      : objType === 0 || objType === 4
+        ? node && (node.token || node.wiki_token)
+        : node && (node.url_token || node.obj_token || node.token);
+    return base && path && /^[A-Za-z0-9]+$/.test(String(token || ''))
+      ? `${base}/${path}/${token}`
+      : '';
+  }
+
+  function asNode(n, origin = '') {
+    const node = {
+      title: n.name,
+      obj_token: n.obj_token || n.token,
+      obj_type: n.type,
+      wiki_token: n.token,
+      url_token: n.obj_token || n.token,
+      has_child: isFolder(n),
+      edit_time: Number(n.edit_time) || 0,
+    };
+    const sourceUrl = sourceUrlForNode(origin, n, 'drive');
+    return sourceUrl ? { ...node, source_url: sourceUrl } : node;
+  }
 
   // 知识库节点把修改时间放在 detail_info 里，云空间节点直接在顶层。统一取秒。
   const editTime = (node) =>
@@ -107,6 +139,22 @@
   function withExt(stem, ext) {
     if (!ext) return stem;
     return stem.toLowerCase().endsWith(`.${ext.toLowerCase()}`) ? stem : `${stem}.${ext}`;
+  }
+
+  // 可选地把 URL 中的唯一 token 加到文档文件名末尾。标题主干仍限制在 80 字符，
+  // 但 token 必须完整保留，否则这个选项就失去了消歧和追溯价值。
+  function addTokenToFilename(filename, token, enabled) {
+    const name = String(filename == null ? '' : filename);
+    const value = String(token == null ? '' : token).trim();
+    if (!enabled || !value) return name;
+    const dot = name.lastIndexOf('.');
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? name.slice(dot) : '';
+    if (stem === value || stem.endsWith(`-${value}`)) return name;
+    const suffix = `-${value}`;
+    const maxHead = Math.max(1, 80 - suffix.length);
+    const head = stem.slice(0, maxHead).replace(/[-\s]+$/, '') || 'untitled';
+    return `${head}${suffix}${ext}`;
   }
 
   // 按 cookie 名精确取值。不能用 /name=([^;]+)/ 去 match 整条 cookie 串：
@@ -154,6 +202,77 @@
     return 'drive';
   }
 
+  // TXT 来源只认当前租户的标准两段路径：/<类型>/<token>。查询参数和锚点不参与
+  // token 判断；保留规范化后的原 URL，便于后续扩展和排查输入。
+  function parseDocumentUrl(raw, currentOrigin) {
+    let url;
+    try { url = new URL(String(raw == null ? '' : raw).trim()); }
+    catch (e) { throw new Error('invalid'); }
+    if (url.protocol !== 'https:') throw new Error('protocol');
+    if (url.origin !== currentOrigin) throw new Error('origin');
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length !== 2) throw new Error('path');
+    const [kind, urlToken] = parts;
+    if (!/^[A-Za-z0-9]+$/.test(urlToken)) throw new Error('token');
+    if (kind !== 'wiki' && !(kind in URL_TYPES)) throw new Error('path');
+    return {
+      url: url.href, kind, urlToken,
+      objType: kind === 'wiki' ? null : URL_TYPES[kind],
+    };
+  }
+
+  function parseUrlText(text, currentOrigin) {
+    const items = [];
+    const errors = [];
+    String(text == null ? '' : text).split(/\r?\n/).forEach((raw, i) => {
+      const lineNumber = i + 1;
+      const line = raw.replace(/^\uFEFF/, '').trim();
+      if (!line) return;
+      try { items.push({ ...parseDocumentUrl(line, currentOrigin), lineNumber }); }
+      catch (e) { errors.push({ lineNumber, raw: line, reason: e.message }); }
+    });
+    return { items, errors };
+  }
+
+  function buildDirectNode(item) {
+    return {
+      title: item.urlToken,
+      obj_token: item.urlToken,
+      obj_type: item.objType,
+      wiki_token: item.urlToken,
+      url_token: item.urlToken,
+      source_url: item.url,
+      has_child: false,
+      edit_time: 0,
+    };
+  }
+
+  // 普通文档的类型和 token 已包含在 URL 中，不需要再访问网页；wiki URL 则必须把
+  // wiki token 转成实际 obj_token。依赖作为参数传入，让两条分支的网络行为可测试。
+  async function resolveUrlItem(item, getWikiNode) {
+    if (item.kind === 'wiki') {
+      const node = await getWikiNode(item.urlToken);
+      return { ...node, url_token: item.urlToken, source_url: item.url, has_child: false };
+    }
+    return buildDirectNode(item);
+  }
+
+  function normalizeExportResult(result, fallbackExt) {
+    return {
+      fileToken: result.file_token,
+      ext: result.file_extension || fallbackExt,
+      fileName: String(result.file_name || '').trim(),
+    };
+  }
+
+  function titleFromExportResult(fallbackTitle, fileName, ext) {
+    const name = String(fileName || '').trim();
+    if (!name) return fallbackTitle;
+    const suffix = ext ? `.${ext}` : '';
+    return suffix && name.toLowerCase().endsWith(suffix.toLowerCase())
+      ? name.slice(0, -suffix.length) : name;
+  }
+
   // 小于 1 MB 时显示 KB。几个 md 文件本来就到不了 1 MB，
   // 报「0.0 MB」看着像是什么都没导出来。单位不用翻译。
   function formatSize(bytes) {
@@ -161,6 +280,31 @@
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
     return `${(bytes / 1048576).toFixed(1)} MB`;
   }
+
+  async function copyLogText(text, writeText) {
+    const value = String(text == null ? '' : text);
+    if (!value) return false;
+    await writeText(value);
+    return true;
+  }
+
+  function appendSourceUrl(message, url) {
+    const source = String(url == null ? '' : url).trim();
+    return source ? `${message} · ${source}` : message;
+  }
+
+  async function retryAsync(task, retryCount, wait, delayMs, shouldRetry = () => true) {
+    for (let attempt = 0; ; attempt++) {
+      try { return await task(); }
+      catch (e) {
+        if (attempt >= retryCount || !shouldRetry(e)) throw e;
+        await wait(delayMs);
+      }
+    }
+  }
+
+  const isRetryableDownloadStatus = (status) =>
+    status === 0 || status === 408 || status === 429 || (status >= 500 && status < 600);
 
   // 同批次内重名时追加 (2)(3)…。只动最后一段的文件名 —— 带目录时若目录名里有点，
   // 直接找最后一个 '.' 会把后缀插进目录名里去。
@@ -307,8 +451,12 @@
     module.exports = {
       pickFormat, sanitizeName, uniqueName, flatten, findSpaceRoot, TYPES,
       crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem, descendantEnd,
-      buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, formatSize, readCookie,
+      buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, addTokenToFilename,
+      formatSize, readCookie,
       wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
+      parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
+      normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl, retryAsync,
+      isRetryableDownloadStatus, sourceUrlForNode,
     };
   }
   if (typeof document === 'undefined') return; // Node 里跑测试时到此为止
@@ -396,6 +544,36 @@
     return r.data;
   }
 
+  function urlErrorText(reason) {
+    if (reason === 'protocol') return t('errUrlProtocol');
+    if (reason === 'origin') return t('errUrlOrigin');
+    if (reason === 'path') return t('errUrlPath');
+    if (reason === 'token') return t('errUrlToken');
+    return t('errUrlInvalid');
+  }
+
+  async function scanUrls(file, onProgress) {
+    const parsed = parseUrlText(await file.text(), location.origin);
+    for (const e of parsed.errors) {
+      log(appendSourceUrl(t('urlInvalidLine', e.lineNumber, urlErrorText(e.reason)), e.raw));
+    }
+    if (!parsed.items.length) throw new Error(t('errNoValidUrl'));
+
+    const roots = [];
+    for (let i = 0; i < parsed.items.length; i++) {
+      const item = parsed.items[i];
+      onProgress(i, parsed.items.length);
+      try {
+        const node = await resolveUrlItem(item, getNode);
+        roots.push({ node, children: [] });
+      } catch (e) {
+        log(appendSourceUrl(t('urlReadFailed', item.lineNumber, item.urlToken, e.message), item.url));
+      }
+    }
+    onProgress(parsed.items.length, parsed.items.length);
+    return roots;
+  }
+
   // ── 云空间（非知识库）──
   // 实测：参数越少越好，加 type/rank 那些反而 500。node_list 才是真正的子项，
   // entities.nodes 里还混着父节点自己。分页靠 has_more + last_label。
@@ -442,7 +620,12 @@
       if (r.code !== 0) throw new Error(t('errQuery', `${r.code} ${r.msg || ''}`));
       const res = (r.data && r.data.result) || {};
       if (res.job_status === 0) {
-        return { url: `${API}/box/stream/download/all/${res.file_token}`, ext: res.file_extension || fmt.ext };
+        const ready = normalizeExportResult(res, fmt.ext);
+        return {
+          url: `${API}/box/stream/download/all/${ready.fileToken}`,
+          ext: ready.ext,
+          fileName: ready.fileName,
+        };
       }
       // 1/2 = 排队中/处理中；其余非零一律当失败
       if (res.job_status !== 1 && res.job_status !== 2) {
@@ -453,14 +636,23 @@
   }
 
   // 图片那些 authcode 链接实测必须 withCredentials=false —— 带 cookie 会被 CORS 拒。
-  function fetchBlob(url, withCredentials = true) {
+  function fetchBlob(url, withCredentials = true, timeoutMs = 0) {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
+      const fail = (message, retryable) => {
+        const error = new Error(message);
+        error.retryable = retryable;
+        reject(error);
+      };
       x.open('GET', url, true);
       x.withCredentials = withCredentials;
+      x.timeout = timeoutMs;
       x.responseType = 'blob';
-      x.onload = () => (x.status === 200 ? resolve(x.response) : reject(new Error(`HTTP ${x.status}`)));
-      x.onerror = () => reject(new Error(t('errNetwork')));
+      x.onload = () => (x.status === 200
+        ? resolve(x.response)
+        : fail(`HTTP ${x.status}`, isRetryableDownloadStatus(x.status)));
+      x.onerror = () => fail(t('errNetwork'), true);
+      x.ontimeout = () => fail(t('errNetwork'), true);
       x.send();
     });
   }
@@ -480,12 +672,18 @@
     const entries = [];
     for (const url of urls) {
       try {
-        const blob = await fetchBlob(url, false);
+        // 首次失败后再试两次；重试本身不写日志，三次都失败才由外层 catch 报一次。
+        const blob = await retryAsync(
+          () => fetchBlob(url, false, 15000),
+          2,
+          sleep,
+          1000,
+        );
         const rel = `assets/${dir}/${String(entries.length + 1).padStart(3, '0')}.${imageExt(blob.type)}`;
         mapping[url] = rel;
         entries.push(await toEntry(dirPrefix + rel, blob));
       } catch (e) {
-        log(t('imgFailed', e.message));
+        log(appendSourceUrl(t('imgFailed', e.message), url));
       }
     }
     return { md: rewriteImageLinks(md, mapping), entries };
@@ -509,6 +707,8 @@
   let failed = [];
   let stopped = false;
   let running = false;
+  let selectedUrlFile = null;
+  let copyFeedbackTimer = null;
   // 上次成功列出的是哪个页面。打开面板时落在目标明确的页面（知识库文档页/文件夹页）
   // 就自动列一次，同一页面不重复列；「我的云空间」意图不明确，不自动跑。
   let listedFor = null;
@@ -517,9 +717,33 @@
 
   function log(msg) {
     const el = $('fbe-log');
-    el.hidden = false; // 没话说的时候不占地方
+    $('fbe-log-wrap').hidden = false; // 没话说的时候不占地方
     el.textContent += (el.textContent ? '\n' : '') + msg;
     el.scrollTop = el.scrollHeight;
+  }
+
+  async function copyCurrentLog() {
+    const button = $('fbe-log-copy');
+    button.disabled = true;
+    clearTimeout(copyFeedbackTimer);
+    try {
+      const copied = await copyLogText(
+        $('fbe-log').textContent,
+        (text) => navigator.clipboard.writeText(text),
+      );
+      button.textContent = copied ? t('copyLogDone') : t('copyLogFailed');
+      button.title = button.textContent;
+    } catch (e) {
+      button.textContent = t('copyLogFailed');
+      button.title = `${t('copyLogFailed')}: ${e.message}`;
+    } finally {
+      button.disabled = false;
+      copyFeedbackTimer = setTimeout(() => {
+        if (!button.isConnected) return;
+        button.textContent = t('copyLog');
+        button.title = t('copyLog');
+      }, 1600);
+    }
   }
 
   function setProgress(done, total, elapsedMs) {
@@ -659,7 +883,9 @@
   // fbe-src 不存：它该跟着当前页面走，存下来反而会在换页后是错的。
   // fbe-since 不存：那是个一次性动作，不是状态。
   const SETTINGS_KEY = 'fbe-settings';
-  const SETTING_IDS = ['fbe-lang', 'fbe-fmt', 'fbe-img', 'fbe-comment', 'fbe-num', 'fbe-parent', 'fbe-dirs'];
+  const SETTING_IDS = [
+    'fbe-lang', 'fbe-fmt', 'fbe-img', 'fbe-comment', 'fbe-num', 'fbe-parent', 'fbe-token', 'fbe-dirs',
+  ];
 
   // 语言得在建面板之前就知道 —— 面板的文案是建的时候一次性写死的。
   function readSettings() {
@@ -697,7 +923,14 @@
 
     const { spaceId, rootToken, rootNode } = await findSpaceRoot(token, getNode);
     const walk = async (node) => {
-      const item = { node, children: [] };
+      const item = {
+        node: {
+          ...node,
+          url_token: node.wiki_token,
+          source_url: sourceUrlForNode(location.origin, node, 'wiki'),
+        },
+        children: [],
+      };
       if (node.has_child) {
         onFolder();
         let kids;
@@ -727,7 +960,7 @@
         try {
           kids = await driveList('children/list/', `&token=${node.wiki_token}`);
         } catch (e) { onSkip(node, e); return item; }
-        for (const child of kids) item.children.push(await walk(asNode(child)));
+        for (const child of kids) item.children.push(await walk(asNode(child, location.origin)));
       }
       return item;
     };
@@ -742,7 +975,7 @@
       ...await driveList('my_space/obj/'),
     ];
     const items = [];
-    for (const n of roots) items.push(await walk(asNode(n)));
+    for (const n of roots) items.push(await walk(asNode(n, location.origin)));
     return items;
   }
 
@@ -759,7 +992,7 @@
     const walk = driveWalker(onFolder, onSkip);
     const items = [];
     for (const n of await driveList('children/list/', `&token=${token}`)) {
-      items.push(await walk(asNode(n)));
+      items.push(await walk(asNode(n, location.origin)));
     }
     return items;
   }
@@ -768,7 +1001,7 @@
     const button = $('fbe-scan');
     button.disabled = true;
     $('fbe-log').textContent = '';
-    $('fbe-log').hidden = true;
+    $('fbe-log-wrap').hidden = true;
     showEmpty(t('listing'));
     try {
       let folders = 0;
@@ -783,18 +1016,29 @@
       // 而当前页面根本不匹配，这两种是必错（drive 任何页面都能用，不拦），就切到当前
       // 页面对应的来源。下拉同步过去，日志说一声 —— 让人看到跑的就是显示的那个。
       const matched = sourceForPath(location.pathname);
-      if ((src === 'wiki' && matched !== 'wiki') || (src === 'folder' && matched !== 'folder')) {
+      if (src !== 'urls'
+        && ((src === 'wiki' && matched !== 'wiki') || (src === 'folder' && matched !== 'folder'))) {
         src = matched;
         srcSel.value = matched;
+        updateSourceControls();
         const name = matched === 'wiki' ? t('srcWiki') : matched === 'folder' ? t('srcFolder') : t('srcDrive');
         log(t('srcAutoSwitched', name));
       }
-      const scanner = src === 'drive' ? scanDrive : (src === 'folder' ? scanFolder : scanWiki);
-      const items = await scanner(onFolder, onSkip);
+      let items;
+      if (src === 'urls') {
+        if (!selectedUrlFile) throw new Error(t('errNoUrlFile'));
+        items = await scanUrls(selectedUrlFile, (done, total) => {
+          showEmpty(t('urlChecking', done, total));
+        });
+      } else {
+        const scanner = src === 'drive' ? scanDrive : (src === 'folder' ? scanFolder : scanWiki);
+        items = await scanner(onFolder, onSkip);
+      }
       rows = flatten(items);
-      listedFor = location.pathname;
+      listedFor = src === 'urls' ? 'urls' : location.pathname;
       renderTree();
-      log(t('listDone', rows.length, folders));
+      if (src === 'urls') log(t('urlListDone', rows.length));
+      else log(t('listDone', rows.length, folders));
       if (skips.length) log(t('listSkipped', skips.length, skips.slice(0, 5).join('; ')));
     } catch (e) {
       rows = [];
@@ -823,7 +1067,11 @@
     // 所以「自动」模式下文档给 md 时也照样带图。docx/pdf/xlsx 是二进制、
     // 图片已内嵌在文件里，没有外链可转，这个开关对它们无意义。
     const withImages = $('fbe-img').checked;
-    const nameOpts = { number: $('fbe-num').checked, parent: $('fbe-parent').checked };
+    const nameOpts = {
+      number: $('fbe-num').checked,
+      parent: $('fbe-parent').checked,
+      token: $('fbe-token').checked,
+    };
     const keepTree = $('fbe-dirs').checked;
     const needComment = $('fbe-comment').checked;
     const used = new Set();
@@ -837,13 +1085,27 @@
       setProgress(i, items.length, Date.now() - startedAt);
       try {
         const fmt = pickFormat(node.obj_type, want);
-        if (!fmt) { log(t('skipUnsupported', node.title, typeName(node.obj_type))); continue; }
+        if (!fmt) {
+          log(appendSourceUrl(t('skipUnsupported', node.title, typeName(node.obj_type)), node.source_url));
+          continue;
+        }
 
         const result = await exportOne(node, fmt, needComment);
         const dirPrefix = buildDirPrefix(path, keepTree);
-        const stem = buildStem(nextSeq(seq, dirPrefix), path[path.length - 1], node.title, nameOpts);
-        const name = uniqueName(dirPrefix + withExt(stem, result.ext), used);
-        const blob = await fetchBlob(result.url);
+        const title = titleFromExportResult(node.title, result.fileName, result.ext);
+        const stem = buildStem(nextSeq(seq, dirPrefix), path[path.length - 1], title, nameOpts);
+        const plainName = withExt(stem, result.ext);
+        const tokenName = addTokenToFilename(plainName, node.url_token, nameOpts.token);
+        const name = uniqueName(dirPrefix + tokenName, used);
+        // 最终产物和附件共用这个入口。只重试网络错误、408、429 与 5xx；
+        // 权限、链接不存在等确定性 4xx 立即失败，避免无意义等待。
+        const blob = await retryAsync(
+          () => fetchBlob(result.url, true, 120000),
+          2,
+          sleep,
+          1000,
+          (error) => error.retryable === true,
+        );
 
         if (withImages && result.ext === 'md') {
           const localized = await localizeImages(await blob.text(), stem, dirPrefix);
@@ -856,7 +1118,7 @@
         }
       } catch (e) {
         failed.push(items[i]);
-        log(t('itemFailed', node.title, e.message));
+        log(appendSourceUrl(t('itemFailed', node.title, e.message), node.source_url));
       }
       await sleep(1500); // 导出是服务端排队任务，别并发压它
     }
@@ -931,6 +1193,12 @@
     window.addEventListener('resize', () => placeFab(fab, pos().right, pos().bottom));
   }
 
+  function updateSourceControls() {
+    const urlMode = $('fbe-src').value === 'urls';
+    $('fbe-url-row').hidden = !urlMode;
+    $('fbe-url-name').textContent = selectedUrlFile ? selectedUrlFile.name : t('urlNoFile');
+  }
+
   function buildPanel() {
     const fab = document.createElement('button');
     fab.id = 'fbe-fab';
@@ -963,9 +1231,15 @@
           <option value="wiki">${t('srcWiki')}</option>
           <option value="folder">${t('srcFolder')}</option>
           <option value="drive">${t('srcDrive')}</option>
+          <option value="urls">${t('srcUrls')}</option>
         </select>
         <button id="fbe-scan" class="fbe-btn">${t('listDocs')}</button>
         <input type="search" id="fbe-q" placeholder="${t('filterPlaceholder')}">
+      </div>
+      <div id="fbe-url-row" class="fbe-row fbe-row--file" hidden>
+        <input type="file" id="fbe-url-file" accept=".txt,text/plain" hidden>
+        <button type="button" id="fbe-url-choose" class="fbe-btn">${t('urlChooseFile')}</button>
+        <span id="fbe-url-name" class="fbe-file-name"></span>
       </div>
       <div class="fbe-step"><b>2</b>${t('step2')}</div>
 
@@ -1006,6 +1280,8 @@
           <span>${t('optNum')}<em>${t('optNumTip')}</em></span></label>
         <label class="fbe-opt"><input type="checkbox" id="fbe-parent">
           <span>${t('optParent')}<em>${t('optParentTip')}</em></span></label>
+        <label class="fbe-opt"><input type="checkbox" id="fbe-token">
+          <span>${t('optToken')}<em>${t('optTokenTip')}</em></span></label>
         <p id="fbe-hint">${t('hintCascade')}<br>${t('hintTri')}</p>
       </details>
       </div>
@@ -1020,7 +1296,13 @@
         <div class="track"><div id="fbe-progress-fill"></div></div>
         <span id="fbe-progress-text"></span>
       </div>
-      <pre id="fbe-log" hidden></pre>`;
+      <div id="fbe-log-wrap" hidden>
+        <div class="fbe-log-tools">
+          <button type="button" id="fbe-log-copy" class="fbe-log-copy"
+                  title="${t('copyLog')}">${t('copyLog')}</button>
+        </div>
+        <pre id="fbe-log"></pre>
+      </div>`;
 
     document.body.append(fab, panel);
 
@@ -1029,12 +1311,14 @@
     const open = () => {
       fab.hidden = true; panel.hidden = false;
       // 站内跳转不重载脚本，打开时重算一次，来源才真的「跟着页面走」
-      const src = sourceForPath(location.pathname);
+      const src = $('fbe-src').value === 'urls' ? 'urls' : sourceForPath(location.pathname);
       $('fbe-src').value = src;
+      updateSourceControls();
       // 落在知识库文档页或文件夹页这种目标明确的页面上，打开就直接列出文档，省一次点击；
       // 知识库首页（src=wiki 但 URL 取不到 token）和「我的云空间」意图不明，不自动跑。
       // 同一页面不重复列，导出进行中也不跑。scan 自带 try/catch，这里不 await。
-      const concrete = src === 'folder' || (src === 'wiki' && wikiTokenFromPath(location.pathname));
+      const concrete = src !== 'urls'
+        && (src === 'folder' || (src === 'wiki' && wikiTokenFromPath(location.pathname)));
       if (concrete && !running && listedFor !== location.pathname) scan();
       $('fbe-src').focus();
     };
@@ -1061,9 +1345,16 @@
     $('fbe-q').oninput = applyFilter;
     $('fbe-since').onchange = (e) => selectRecent(Number(e.target.value));
     // 来源跟着当前页面走（首次打开；之后每次 open 都会按当前 URL 重算）
-    $('fbe-src').value = sourceForPath(location.pathname);
+    $('fbe-src').value = listedFor === 'urls' ? 'urls' : sourceForPath(location.pathname);
     loadSettings();
+    updateSourceControls();
     SETTING_IDS.forEach((id) => { $(id).addEventListener('change', saveSettings); });
+    $('fbe-src').onchange = updateSourceControls;
+    $('fbe-url-choose').onclick = () => $('fbe-url-file').click();
+    $('fbe-url-file').onchange = (e) => {
+      selectedUrlFile = e.target.files[0] || null;
+      updateSourceControls();
+    };
     $('fbe-all').onchange = (e) => {
       checkboxes().forEach((c) => { if (!c.disabled) c.checked = e.target.checked; });
       refreshMarks();
@@ -1072,6 +1363,7 @@
     $('fbe-start').onclick = () => run(checkboxes().flatMap((c, i) => (c.checked ? [rows[i]] : [])));
     $('fbe-stop').onclick = () => { stopped = true; $('fbe-stop').disabled = true; };
     $('fbe-retry').onclick = () => run(failed.slice());
+    $('fbe-log-copy').onclick = copyCurrentLog;
     $('fbe-lang').onchange = async (e) => {
       await loadLocale(e.target.value);
       rebuildPanel();
@@ -1088,13 +1380,17 @@
     const logText = $('fbe-log') ? $('fbe-log').textContent : '';
     const checkedBefore = checkboxes().map((c) => c.checked);
     const query = $('fbe-q') ? $('fbe-q').value : '';
+    const source = $('fbe-src') ? $('fbe-src').value : sourceForPath(location.pathname);
 
     if (panel) panel.remove();
     if ($('fbe-fab')) $('fbe-fab').remove();
     buildPanel();
 
     $('fbe-log').textContent = logText;
+    $('fbe-log-wrap').hidden = !logText;
     $('fbe-q').value = query;
+    $('fbe-src').value = source;
+    updateSourceControls();
     if (rows.length) {
       renderTree();
       checkboxes().forEach((c, i) => { c.checked = !!checkedBefore[i]; });

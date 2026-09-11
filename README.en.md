@@ -8,7 +8,7 @@
 
 <img src="assets/panel-en.png" width="380" align="right" alt="The panel: list a wiki, check documents, export">
 
-Works on **wikis** and **drive** documents, on Feishu and Lark alike. Exports Markdown, Word or PDF; more than one file is packed automatically, with the folder structure preserved.
+Works on **wikis**, **drive**, and **URL list (TXT)** input, on Feishu and Lark alike. Exports Markdown, Word or PDF; more than one file is packed automatically, with the folder structure preserved.
 
 **Images are saved alongside** — not a nicety: in Feishu's exported Markdown, images are signed URLs that **expire in about 24 hours**. Leave them and your backup is text-only within days.
 
@@ -43,6 +43,11 @@ Pick a source and hit **List documents** (on a wiki document or folder page, ope
 - **This wiki** — climbs from the open document to the space root and pulls the whole tree. Needs a `/wiki/xxx` page.
 - **This folder** — walks everything under the folder you're looking at. Needs a `/drive/folder/xxx` page. **Use this for folders shared with you** — they don't live under your own space root, so the source below can't see them.
 - **My drive** — everything under your own space root. Works on any page.
+- **URL list (TXT)** — choose a `.txt` file containing one URL per line. Links must belong to the Feishu / Lark site currently open. Wiki, new and legacy docs, sheets, bitables, and file links are supported; blank lines are ignored and duplicates keep their original order.
+
+The TXT option is only another input source. Its rows enter the same checklist and reuse the existing export, download, image-localisation, and zip flow. Direct document links provide their type and unique ID locally, so listing does not open every document page; wiki links still use the existing API to convert a wiki token into the underlying document token. Direct documents are shown by unique ID until export. After a successful export, the filename prefers the real title returned by Feishu's export result. The existing export request verifies actual read/download permission for each row. Missing, inaccessible, or malformed entries keep their corresponding link in the log without stopping the rest.
+
+A direct `file` URL does not contain the original filename, so that attachment currently downloads under its unique ID. Attachments listed from a wiki, folder, or drive still keep their original names.
 
 **2 Check the ones you want**
 
@@ -58,7 +63,11 @@ Types that can't be exported (mindnotes) are disabled outright — you're never 
 
 **More than one file is packed into a single zip** (`feishu-export-YYYY-MM-DD.zip`); a lone file downloads directly, so Chrome never asks you to allow multiple downloads. Hit **Stop** mid-run and whatever finished still gets packed.
 
+Each final product or attachment download may run for up to 120 seconds. Network errors and HTTP 408, 429, or 5xx responses retry up to twice with a one-second delay. Deterministic failures such as 401, 403, and 404 go straight to the failed list without another request; export-job creation and progress polling keep their existing behaviour. A final failure writes one log entry containing the source document or attachment URL.
+
 The panel shows progress and a remaining-time estimate based on measured throughput, so a long run isn't a guessing game.
+
+Use the small button in the top-right of the log area to copy the complete log when reporting failed links or troubleshooting.
 
 **Start export** stays pinned to the bottom of the panel and the middle section scrolls — on a short laptop screen the primary action is never pushed out of sight.
 
@@ -73,10 +82,11 @@ Under **More settings**. The defaults aim at one thing: **mirror the wiki faithf
 | Save comments too | off | Most people want the body text — but discussion threads often hold conclusions that live nowhere else |
 | Number filenames | off | Clean `Title.md` wins. Turn it on to preserve the wiki's ordering |
 | Prefix parent folder | off | Redundant while folder structure is on. For flat exports that need disambiguating |
+| Add unique document ID to filename | off | Adds the document's unique ID to the exported filename, such as `Title-doxcnAbC123.md` |
 
 Settings are remembered. Numbering **restarts inside each folder** when folder structure is on, so you never get a folder containing `007`, `019` — a flat export falls back to one global sequence.
 
-**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Images that can't be fetched keep their original link and get a line in the log; the link is never rewritten to something broken.
+**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Each image request times out after 15 seconds and retries up to twice, waiting one second between attempts. Only a final failure adds one log entry with the image URL; the Markdown keeps the original link rather than rewriting it to something broken.
 
 ## What it can export
 
@@ -120,7 +130,7 @@ Since Chrome 138, injecting user scripts needs the separate **userScripts** perm
 node --test test.mjs
 ```
 
-Tests evaluate `extension/content.js` directly, so there is **no build step and no second copy of the logic to drift**. They cover format mapping, filename sanitising and deduplication, tree flattening, space-root discovery, the hand-written zip container, drive-node normalisation, and both locale files (same keys, same placeholder counts, every key referenced by code or manifest exists, no hardcoded Chinese left in the UI, store fields within Chrome's length limits).
+Tests evaluate `extension/content.js` directly, so there is **no build step and no second copy of the logic to drift**. They cover format mapping, URL-list parsing and node conversion, export-result filename normalisation, filename sanitising and unique-ID suffixes, log copying and source links, image retries, product-download retry classification, collision handling, tree flattening, space-root discovery, the hand-written zip container, drive-node normalisation, and both locale files (same keys, same placeholder counts, every key referenced by code or manifest exists, no hardcoded Chinese left in the UI, store fields within Chrome's length limits).
 
 The i18n checks were mutation-tested — a key was deleted and a placeholder dropped on purpose to confirm the tests actually go red. Otherwise "all green" might just mean they check nothing.
 
