@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const src = readFileSync(new URL('./extension/content.js', import.meta.url), 'utf8');
+const backgroundSrc = readFileSync(new URL('./extension/background.js', import.meta.url), 'utf8');
 const mod = { exports: {} };
 new Function('module', src)(mod);
 const {
@@ -16,9 +17,106 @@ const {
   sourceUrlForNode,
   parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
   addTokenToFilename,
-  normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl, retryAsync,
-  isRetryableDownloadStatus,
+  normalizeExportResult, titleFromExportResult, titleFromDownload,
+  requestAttachmentFilename, copyLogText, appendSourceUrl, retryAsync,
+  isRetryableDownloadStatus, collectDrivePages, withCleanup, createRequestTracker,
+  pollBeforeDeadline, filenameFromContentDisposition,
 } = mod.exports;
+
+function loadBackground(fetchImpl) {
+  let onMessage;
+  const chromeMock = {
+    action: { onClicked: { addListener() {} } },
+    tabs: { sendMessage: async () => {} },
+    runtime: {
+      getURL: (path) => `chrome-extension://test/${path}`,
+      onMessage: { addListener(listener) { onMessage = listener; } },
+    },
+  };
+  new Function('chrome', 'fetch', backgroundSrc)(chromeMock, fetchImpl);
+  return onMessage;
+}
+
+function callBackground(listener, message, sender) {
+  let keepOpen;
+  const response = new Promise((resolve) => {
+    keepOpen = listener(message, sender, resolve);
+  });
+  return { keepOpen, response };
+}
+
+test('background: 从飞书 file token 发起固定下载路径的 HEAD 并返回响应头', async () => {
+  const calls = [];
+  const header = 'attachment; filename*=UTF-8\'\'%E6%B5%8B%E8%AF%95.docx';
+  const listener = loadBackground(async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name.toLowerCase() === 'content-disposition' ? header : null) },
+    };
+  });
+
+  const pending = callBackground(
+    listener,
+    { type: 'fbe-file-name', token: 'boxcnFileToken123', requestId: '1' },
+    { url: 'https://acme.feishu.cn/file/boxcnFileToken123', tab: { id: 7 } },
+  );
+
+  assert.equal(pending.keepOpen, true);
+  assert.deepEqual(await pending.response, { contentDisposition: header });
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].url,
+    'https://acme.feishu.cn/space/api/box/stream/download/all/boxcnFileToken123',
+  );
+  assert.equal(calls[0].options.method, 'HEAD');
+  assert.equal(calls[0].options.credentials, 'include');
+});
+
+test('background: 拒绝非法 token 和非飞书来源且不发请求', () => {
+  let calls = 0;
+  const listener = loadBackground(async () => { calls++; });
+  const unsafe = [
+    [{ type: 'fbe-file-name', token: '../secret', requestId: '1' }, { url: 'https://acme.feishu.cn/file/x', tab: { id: 7 } }],
+    [{ type: 'fbe-file-name', token: 'boxcnSafeToken', requestId: '1' }, { url: 'https://evil.example/file/x', tab: { id: 7 } }],
+  ];
+
+  for (const [message, sender] of unsafe) {
+    let response;
+    const keepOpen = listener(message, sender, (value) => { response = value; });
+    assert.notEqual(keepOpen, true);
+    assert.deepEqual(response, { error: 'invalid file request' });
+  }
+  assert.equal(calls, 0);
+});
+
+test('background: 取消消息会中止同一标签页中的文件名 HEAD 请求', async () => {
+  let signal;
+  const listener = loadBackground((_url, options) => new Promise((_resolve, reject) => {
+    signal = options.signal;
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  }));
+  const sender = { url: 'https://acme.feishu.cn/file/boxcnFileToken123', tab: { id: 7 } };
+  const pending = callBackground(
+    listener,
+    { type: 'fbe-file-name', token: 'boxcnFileToken123', requestId: '1' },
+    sender,
+  );
+  await Promise.resolve();
+
+  let cancelResponse;
+  const keepOpen = listener(
+    { type: 'fbe-file-name-cancel', requestId: '1' },
+    sender,
+    (value) => { cancelResponse = value; },
+  );
+
+  assert.notEqual(keepOpen, true);
+  assert.deepEqual(cancelResponse, { cancelled: true });
+  assert.equal(signal.aborted, true);
+  assert.equal(typeof (await pending.response).error, 'string');
+});
 
 test('driveFolderTokenFromPath: 认出「我正在看的文件夹」', () => {
   // 别人分享给你的文件夹不在你自己空间的根下，my_space 那两个接口扫不到它，
@@ -109,18 +207,37 @@ test('parseDocumentUrl: 拒绝不安全、跨域和不支持的链接', () => {
   assert.throws(() => parseDocumentUrl(`${origin}/docx/`, origin), /path/);
 });
 
-test('parseUrlText: 忽略空行但保留重复 URL 和原始行号', () => {
+test('parseUrlText: 忽略空行并保留原始行号', () => {
   const parsed = parseUrlText(
     '\uFEFFhttps://acme.feishu.cn/docx/A?x=1\r\n'
       + '\r\n'
-      + '  https://acme.feishu.cn/docx/A?x=1  \r\n'
+      + '  https://acme.feishu.cn/docx/B?x=1  \r\n'
       + 'not-a-url\r\n',
     'https://acme.feishu.cn',
   );
   assert.deepEqual(parsed.items.map((x) => x.lineNumber), [1, 3]);
-  assert.deepEqual(parsed.items.map((x) => x.urlToken), ['A', 'A']);
+  assert.deepEqual(parsed.items.map((x) => x.urlToken), ['A', 'B']);
   assert.deepEqual(parsed.errors.map((x) => [x.lineNumber, x.reason]), [[4, 'invalid']]);
   assert.equal(parsed.errors[0].raw, 'not-a-url');
+});
+
+test('parseUrlText: 按文档类型和 token 去重并保留首次出现项', () => {
+  const origin = 'https://acme.feishu.cn';
+  const parsed = parseUrlText([
+    `${origin}/docx/A?from=copy`,
+    `${origin}/docx/A#heading`,
+    `${origin}/docs/A`,
+    `${origin}/wiki/A?from=copy`,
+    `${origin}/wiki/A#heading`,
+  ].join('\n'), origin);
+
+  assert.deepEqual(parsed.items.map((x) => [x.kind, x.urlToken, x.lineNumber]), [
+    ['docx', 'A', 1],
+    ['docs', 'A', 3],
+    ['wiki', 'A', 4],
+  ]);
+  assert.equal(parsed.items[0].url, `${origin}/docx/A?from=copy`);
+  assert.equal(parsed.items[2].url, `${origin}/wiki/A?from=copy`);
 });
 
 test('buildDirectNode: 普通文档使用 URL token 且保留导出字段', () => {
@@ -231,6 +348,111 @@ test('normalizeExportResult: 使用导出结果中的真实文件名，缺失时
   assert.equal(titleFromExportResult('列表兜底标题', '真实标题.md', 'md'), '真实标题');
   assert.equal(titleFromExportResult('列表兜底标题', '真实标题', 'md'), '真实标题');
   assert.equal(titleFromExportResult('列表兜底标题', '', 'md'), '列表兜底标题');
+});
+
+test('filenameFromContentDisposition: 优先解码 UTF-8 filename*', () => {
+  const header = 'attachment; filename="%E7%A4%BA%E4%BE%8B%E9%99%84%E4%BB%B6.docx"; filename*=UTF-8\'\'%E7%A4%BA%E4%BE%8B%E9%99%84%E4%BB%B6.docx';
+  assert.equal(filenameFromContentDisposition(header), '示例附件.docx');
+});
+
+test('filenameFromContentDisposition: filename* 缺失时解码 filename', () => {
+  assert.equal(
+    filenameFromContentDisposition('attachment; filename="%E6%B5%8B%E8%AF%95.docx"'),
+    '测试.docx',
+  );
+});
+
+test('filenameFromContentDisposition: filename* 损坏时退回有效的 filename', () => {
+  assert.equal(
+    filenameFromContentDisposition('attachment; filename="good.docx"; filename*=UTF-8\'\'bad%ZZ'),
+    'good.docx',
+  );
+});
+
+test('filenameFromContentDisposition: 普通 filename 中的字面百分号保持原样', () => {
+  assert.equal(
+    filenameFromContentDisposition('attachment; filename="100%complete.docx"'),
+    '100%complete.docx',
+  );
+});
+
+test('filenameFromContentDisposition: 普通 filename 中的单引号不被当成字符集前缀', () => {
+  assert.equal(
+    filenameFromContentDisposition('attachment; filename="O\'Reilly\'s Guide.docx"'),
+    'O\'Reilly\'s Guide.docx',
+  );
+});
+
+test('titleFromDownload: 附件采用响应头文件名，缺失时回退节点标题', () => {
+  assert.equal(
+    titleFromDownload('boxcnToken', '', '示例附件.docx', null),
+    '示例附件.docx',
+  );
+  assert.equal(titleFromDownload('boxcnToken', '', '', null), 'boxcnToken');
+});
+
+test('requestAttachmentFilename: 只发送 token 并解析后台响应头', async () => {
+  const messages = [];
+  let released = 0;
+  const fileName = await requestAttachmentFilename(
+    'boxcnFileToken123',
+    '1',
+    async (message) => {
+      messages.push(message);
+      return {
+        contentDisposition: 'attachment; filename*=UTF-8\'\'%E6%B5%8B%E8%AF%95.docx',
+      };
+    },
+    () => () => { released++; },
+  );
+  assert.equal(fileName, '测试.docx');
+  assert.deepEqual(messages, [{ type: 'fbe-file-name', token: 'boxcnFileToken123', requestId: '1' }]);
+  assert.equal(released, 1);
+});
+
+test('requestAttachmentFilename: 后台失败时保留错误原因', async () => {
+  await assert.rejects(
+    requestAttachmentFilename(
+      'boxcnFileToken123',
+      '1',
+      async () => ({ error: 'HTTP 403' }),
+      () => () => {},
+    ),
+    /HTTP 403/,
+  );
+});
+
+test('requestAttachmentFilename: 活动请求中止时通知后台并释放登记', async () => {
+  const messages = [];
+  let abort;
+  let finishHead;
+  let released = 0;
+  const pending = requestAttachmentFilename(
+    'boxcnFileToken123',
+    '1',
+    (message) => {
+      messages.push(message);
+      if (message.type === 'fbe-file-name-cancel') {
+        finishHead({ error: 'HEAD aborted' });
+        return Promise.resolve({ cancelled: true });
+      }
+      return new Promise((resolve) => { finishHead = resolve; });
+    },
+    (request) => {
+      abort = request.abort;
+      return () => { released++; };
+    },
+  );
+  await Promise.resolve();
+
+  await abort();
+
+  await assert.rejects(pending, /HEAD aborted/);
+  assert.deepEqual(messages, [
+    { type: 'fbe-file-name', token: 'boxcnFileToken123', requestId: '1' },
+    { type: 'fbe-file-name-cancel', requestId: '1' },
+  ]);
+  assert.equal(released, 1);
 });
 
 test('formatSize: 小体积不报 0.0 MB', () => {
@@ -371,6 +593,121 @@ test('retryAsync: 非法 retryAfterMs 回退到固定间隔，且服务端值封
   assert.equal(await waitFor(0), 1000);
   assert.equal(await waitFor(undefined), 1000);
   assert.equal(await waitFor(120000), 30000);
+});
+
+test('retryAsync: 用户取消后不重试也不等待', async () => {
+  const cancelled = new Error('cancelled');
+  cancelled.cancelled = true;
+  let attempts = 0;
+  let waits = 0;
+
+  await assert.rejects(
+    () => retryAsync(
+      async () => { attempts++; throw cancelled; },
+      2,
+      async () => { waits++; },
+      1000,
+    ),
+    (error) => error === cancelled,
+  );
+  assert.equal(attempts, 1);
+  assert.equal(waits, 0);
+});
+
+test('createRequestTracker: 只中止仍在进行的请求并清空登记', () => {
+  const aborted = [];
+  const tracker = createRequestTracker();
+  const releaseFirst = tracker.track({ abort: () => aborted.push('first') });
+  tracker.track({ abort: () => aborted.push('second') });
+
+  releaseFirst();
+  tracker.abortAll();
+  tracker.abortAll();
+
+  assert.deepEqual(aborted, ['second']);
+});
+
+test('pollBeforeDeadline: 请求耗时计入总时限并限制最后一次请求时间', async () => {
+  let now = 0;
+  const requestTimeouts = [];
+  const result = await pollBeforeDeadline(
+    async (timeoutMs) => {
+      requestTimeouts.push(timeoutMs);
+      now += timeoutMs - 1000;
+      return null;
+    },
+    async (ms) => { now += ms; },
+    () => now,
+    120000,
+  );
+
+  assert.equal(result, null);
+  assert.deepEqual(requestTimeouts, [30000, 30000, 30000, 29000]);
+  assert.equal(now, 120000);
+});
+
+test('withCleanup: 任务抛错时仍执行清理并保留原始错误', async () => {
+  const failure = new Error('打包失败');
+  let cleaned = false;
+
+  await assert.rejects(
+    () => withCleanup(async () => { throw failure; }, () => { cleaned = true; }),
+    (error) => error === failure,
+  );
+  assert.equal(cleaned, true);
+});
+
+test('collectDrivePages: 超过 40 页仍继续读取到 has_more=false', async () => {
+  const labels = [];
+  const items = await collectDrivePages(async (label) => {
+    labels.push(label);
+    const page = labels.length;
+    const token = `node-${page}`;
+    return {
+      has_more: page < 41,
+      last_label: `cursor-${page}`,
+      node_list: [token],
+      entities: { nodes: { [token]: { token } } },
+    };
+  });
+
+  assert.equal(items.length, 41);
+  assert.equal(items[40].token, 'node-41');
+  assert.equal(labels[0], '');
+  assert.equal(labels[40], 'cursor-40');
+});
+
+test('collectDrivePages: has_more=true 时缺失或重复游标必须报错，不能返回部分结果', async () => {
+  for (const pages of [
+    [{ has_more: true, last_label: '', node_list: [], entities: { nodes: {} } }],
+    [
+      { has_more: true, last_label: 'same', node_list: [], entities: { nodes: {} } },
+      { has_more: true, last_label: 'same', node_list: [], entities: { nodes: {} } },
+    ],
+  ]) {
+    let index = 0;
+    await assert.rejects(
+      () => collectDrivePages(async () => pages[index++]),
+      (error) => error && error.code === 'drive_pagination_cursor',
+    );
+  }
+});
+
+test('collectDrivePages: 达到分页熔断上限时明确报错', async () => {
+  let page = 0;
+  await assert.rejects(
+    () => collectDrivePages(async () => {
+      page++;
+      return {
+        has_more: true,
+        last_label: `cursor-${page}`,
+        node_list: [],
+        entities: { nodes: {} },
+      };
+    }, 2),
+    (error) => error && error.code === 'drive_pagination_limit',
+  );
+  assert.equal(page, 2);
 });
 
 test('asNode: 把云空间节点归一成知识库节点的形状', () => {
@@ -623,6 +960,42 @@ test('zipParts: 文件名按 UTF-8 存并置语言编码位', async () => {
   assert.equal(dv.getUint16(6, true) & 0x0800, 0x0800, 'flag bit 11 必须置位，否则中文名乱码');
   const nameLen = dv.getUint16(26, true);
   assert.equal(new TextDecoder().decode(all.slice(30, 30 + nameLen)), '中文-标题.md');
+});
+
+test('zipParts: 文件数超出 ZIP32 上限时拒绝生成', () => {
+  const entry = { path: 'a', blob: new Blob(), crc: 0, size: 0 };
+  assert.throws(
+    () => zipParts(Array(65536).fill(entry)),
+    (error) => error instanceof RangeError && error.code === 'zip_limit',
+  );
+});
+
+test('zipParts: UTF-8 文件名超出 ZIP32 上限时拒绝生成', () => {
+  assert.throws(
+    () => zipParts([{ path: 'a'.repeat(65536), blob: new Blob(), crc: 0, size: 0 }]),
+    (error) => error instanceof RangeError && error.code === 'zip_limit',
+  );
+});
+
+test('zipParts: 文件大小超出 ZIP32 上限时拒绝生成', () => {
+  assert.throws(
+    () => zipParts([{ path: 'a', blob: new Blob(), crc: 0, size: 0x100000000 }]),
+    (error) => error instanceof RangeError && error.code === 'zip_limit',
+  );
+});
+
+test('zipParts: 本地区总长导致中央目录偏移溢出时拒绝生成', () => {
+  assert.throws(
+    () => zipParts([{ path: 'a', blob: new Blob(), crc: 0, size: 0xffffffff }]),
+    (error) => error instanceof RangeError && error.code === 'zip_limit',
+  );
+});
+
+test('zipParts: 数据区和中央目录合计超过 ZIP32 上限时拒绝生成', () => {
+  assert.throws(
+    () => zipParts([{ path: 'a', blob: new Blob(), crc: 0, size: 0xffffffff - 31 }]),
+    (error) => error instanceof RangeError && error.code === 'zip_limit',
+  );
 });
 
 test('imageExt: 按 MIME 定扩展名，认不出就当 png', () => {

@@ -43,11 +43,13 @@ Pick a source and hit **List documents** (on a wiki document or folder page, ope
 - **This wiki** — climbs from the open document to the space root and pulls the whole tree. Needs a `/wiki/xxx` page.
 - **This folder** — walks everything under the folder you're looking at. Needs a `/drive/folder/xxx` page. **Use this for folders shared with you** — they don't live under your own space root, so the source below can't see them.
 - **My drive** — everything under your own space root. Works on any page.
-- **URL list (TXT)** — choose a `.txt` file containing one URL per line. Links must belong to the Feishu / Lark site currently open. Wiki, new and legacy docs, sheets, bitables, and file links are supported; blank lines are ignored and duplicates keep their original order.
+- **URL list (TXT)** — choose a `.txt` file containing one URL per line. Links must belong to the Feishu / Lark site currently open. Wiki, new and legacy docs, sheets, bitables, and file links are supported; blank lines are ignored, and duplicate links with the same document type and unique ID keep only their first occurrence. Query parameters and fragments do not make them distinct.
+
+Scanning **My drive** continues until the server explicitly returns the last page. A missing, repeated, or excessive pagination cursor produces an error instead of presenting a partial list as complete.
 
 The TXT option is only another input source. Its rows enter the same checklist and reuse the existing export, download, image-localisation, and zip flow. Direct document links provide their type and unique ID locally, so listing does not open every document page; wiki links still use the existing API to convert a wiki token into the underlying document token. Direct documents are shown by unique ID until export. After a successful export, the filename prefers the real title returned by Feishu's export result. The existing export request verifies actual read/download permission for each row. Missing, inaccessible, or malformed entries keep their corresponding link in the log without stopping the rest.
 
-A direct `file` URL does not contain the original filename, so that attachment currently downloads under its unique ID. Attachments listed from a wiki, folder, or drive still keep their original names.
+For a direct `file` URL, the background script first sends a bodyless `HEAD` request and decodes the original filename from `Content-Disposition`; the page then downloads the file with `GET`. If the header is missing or cannot be decoded, the log explains the fallback and the unique ID is used. Attachments listed from a wiki, folder, or drive still use the names returned by the listing API and send no extra `HEAD` request.
 
 The list carries no modification time, so the **Recently edited** selector (last 7 / 30 / 90 days) never matches TXT rows — check them manually. Wiki rows need a token-conversion call each, so listing a long list slows itself automatically (0.4 s per wiki row). If every single link fails to resolve, the result is an explicit error, not an empty success-looking list.
 
@@ -63,9 +65,9 @@ Types that can't be exported (mindnotes) are disabled outright — you're never 
 
 **3 Pick a format, then export**
 
-**More than one file is packed into a single zip** (`feishu-export-YYYY-MM-DD.zip`); a lone file downloads directly, so Chrome never asks you to allow multiple downloads. Hit **Stop** mid-run and whatever finished still gets packed.
+**More than one file is packed into a single zip** (`feishu-export-YYYY-MM-DD.zip`); a lone file downloads directly, so Chrome never asks you to allow multiple downloads. Hit **Stop** mid-run to abort the active network request; whatever finished still gets packed.
 
-Each final product or attachment download may run for up to 120 seconds. Network errors and HTTP 408, 429, or 5xx responses retry up to twice: the delay is one second by default, or the server's `Retry-After` value when present (capped at 30 seconds). Deterministic failures such as 401, 403, and 404 go straight to the failed list without another request; export-job creation and progress polling keep their existing behaviour. A final failure writes one log entry containing the source document or attachment URL.
+Each final product or attachment download may run for up to 120 seconds. Network errors and HTTP 408, 429, or 5xx responses retry up to twice: the delay is one second by default, or the server's `Retry-After` value when present (capped at 30 seconds). Deterministic failures such as 401, 403, and 404 go straight to the failed list without another request. Scan and export-creation API calls time out after 30 seconds; progress polling is not retried and has a 120-second overall deadline. A final failure writes one log entry containing the source document or attachment URL.
 
 The panel shows progress and a remaining-time estimate based on measured throughput, so a long run isn't a guessing game.
 
@@ -88,7 +90,7 @@ Under **More settings**. The defaults aim at one thing: **mirror the wiki faithf
 
 Settings are remembered. Numbering **restarts inside each folder** when folder structure is on, so you never get a folder containing `007`, `019` — a flat export falls back to one global sequence.
 
-**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Each image request times out after 15 seconds and retries up to twice, waiting one second between attempts. Only a final failure adds one log entry with the image URL; the Markdown keeps the original link rather than rewriting it to something broken. Same-titled documents in one batch (duplicate links guarantee this) get image folders with `-2`, `-3` suffixes so images never overwrite each other inside the zip.
+**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Each image request times out after 15 seconds and retries up to twice, waiting one second between attempts. Only a final failure adds one log entry with the image URL; the Markdown keeps the original link rather than rewriting it to something broken. Same-titled documents in one batch get image folders with `-2`, `-3` suffixes so images never overwrite each other inside the zip.
 
 ## What it can export
 
@@ -117,9 +119,9 @@ So the `.mm` file is **serialised in Feishu's own frontend from the in-memory mo
 - **Serial, never concurrent.** 1.5s between documents. Export is a queued job on Feishu's side; hammering it concurrently invites rate limiting and the time saved isn't worth it.
 
   > That 1.5s is a conservative guess — Feishu's actual rate limit was never measured. It is a constant in the code rather than a knob for you, because the right fix is to measure the real threshold, not to hand you the decision.
-- **Packing costs memory.** Everything is collected before zipping. Content is held as Blobs (which the browser can spill to disk), not in the JS heap, so batches of a few hundred MB are fine — but there is no zip64, so 4 GB / 65535 files will break it. The zip uses STORE, no compression: docx/pdf/xlsx/png are already compressed and squeezing them again just burns CPU.
+- **Packing costs memory.** Everything is collected before zipping. Content is held as Blobs (which the browser can spill to disk), not in the JS heap, so batches of a few hundred MB are fine — but there is no zip64. If the file count, name length, size, or offset exceeds ZIP32 limits, the extension reports an error instead of producing a corrupt archive. The zip uses STORE, no compression: docx/pdf/xlsx/png are already compressed and squeezing them again just burns CPU.
 - A failed document doesn't stop the queue; it gets a line in the log and a **Retry N that failed** button.
-- The extension only uses the session already in your browser to call Feishu's own web endpoints. **Nothing is uploaded, there is no server**, and the background script does two things: forward a toolbar click, and hand the panel a locale file. Itemised in [`PRIVACY.md`](PRIVACY.md).
+- The extension only uses the session already in your browser to call Feishu's own web endpoints. **Nothing is uploaded, and there is no server.** The background script forwards toolbar clicks, hands the panel a locale file, and reads original filenames from direct `file` download responses. Itemised in [`PRIVACY.md`](PRIVACY.md).
 - These are internal endpoints, so a Feishu redesign can break them. They're documented in [`docs/how-it-works.md`](docs/how-it-works.md) with the measured type matrix, so you can diff against reality.
 
 ## Why an extension and not a userscript
@@ -140,7 +142,7 @@ The i18n checks were mutation-tested — a key was deleted and a placeholder dro
 extension/
 ├── manifest.json
 ├── content.js          # all the logic
-├── background.js       # forwards toolbar clicks, reads locale files
+├── background.js       # forwards toolbar clicks, reads locale files and attachment names
 ├── panel.css
 ├── _locales/{zh_CN,en}/messages.json
 └── icons/icon-{16,32,48,128}.png
