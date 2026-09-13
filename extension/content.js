@@ -224,6 +224,7 @@
   function parseUrlText(text, currentOrigin) {
     const items = [];
     const errors = [];
+    const duplicates = [];
     const seen = new Set();
     String(text == null ? '' : text).split(/\r?\n/).forEach((raw, i) => {
       const lineNumber = i + 1;
@@ -232,13 +233,14 @@
       try {
         const item = parseDocumentUrl(line, currentOrigin);
         const key = `${item.kind}:${item.urlToken}`;
-        if (seen.has(key)) return;
+        // 丢掉的行也要有下落：备份工具里静默少一条，比多一行日志麻烦得多。
+        if (seen.has(key)) { duplicates.push({ lineNumber, raw: line }); return; }
         seen.add(key);
         items.push({ ...item, lineNumber });
       }
       catch (e) { errors.push({ lineNumber, raw: line, reason: e.message }); }
     });
-    return { items, errors };
+    return { items, errors, duplicates };
   }
 
   function buildDirectNode(item) {
@@ -377,6 +379,10 @@
 
   // check 返回 null 表示仍在处理，否则返回最终结果。单次请求最多等 30 秒，
   // 但最后一次只能使用总截止时间内剩余的时长。
+  // 剩余不足一次请求的预算时直接判总超时：那时发出去请求几乎必然被掐断，报出来的是
+  // 「请求超过 1 秒没有响应」，而真实原因只是轮询总时限已经耗尽。
+  const POLL_MIN_REQUEST_MS = 1000;
+
   async function pollBeforeDeadline(check, wait, now, deadline) {
     while (true) {
       const beforeWait = deadline - now();
@@ -384,7 +390,7 @@
       await wait(Math.min(1000, beforeWait));
 
       const remaining = deadline - now();
-      if (remaining <= 0) return null;
+      if (remaining < POLL_MIN_REQUEST_MS) return null;
       const result = await check(Math.min(30000, remaining));
       if (result !== null) return result;
     }
@@ -642,6 +648,23 @@
     return error;
   }
 
+  // 重试间隔也要能被「停止」打断：429 带 Retry-After 时这里最长等 30 秒，等完才发现
+  // 已经点了停止，等于按钮白按。retryAsync 保持纯函数，停止判断放在注入的 wait 里。
+  const interruptibleWait = (ms) =>
+    (stopped ? Promise.reject(cancelledError()) : sleep(ms));
+
+  // 无回调的 sendMessage 把失败留在 chrome.runtime.lastError 里，只在控制台刷一条
+  // "Unchecked runtime.lastError"。回读 lastError 才能把失败变成能 catch 的拒绝。
+  function runtimeMessage(message) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(message, (response) => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message || 'extension message failed'));
+        else resolve(response);
+      });
+    });
+  }
+
   // ── 文案 ──
   // 默认跟随浏览器语言（chrome.i18n）。手动指定语言时只能自己把 messages.json 读进来
   // 解析 —— chrome.i18n 没有运行时覆盖 locale 的 API。
@@ -744,6 +767,11 @@
     const parsed = parseUrlText(await file.text(), location.origin);
     for (const e of parsed.errors) {
       log(appendSourceUrl(t('urlInvalidLine', e.lineNumber, urlErrorText(e.reason)), e.raw));
+    }
+    // 重复项前面没有逐行报过（不像无效行），这里汇总一次，免得 20 行变成 18 篇没人知道
+    if (parsed.duplicates.length) {
+      log(t('urlDeduped', parsed.duplicates.length,
+        parsed.duplicates.slice(0, 5).map((d) => d.lineNumber).join(', ')));
     }
     if (!parsed.items.length) throw new Error(t('errNoValidUrl'));
 
@@ -887,7 +915,7 @@
         const blob = await retryAsync(
           () => fetchBlob(url, false, 15000),
           2,
-          sleep,
+          interruptibleWait,
           1000,
         );
         const rel = `assets/${dir}/${String(entries.length + 1).padStart(3, '0')}.${imageExt(blob.type)}`;
@@ -1328,7 +1356,7 @@
             responseFileName = await requestAttachmentFilename(
               node.obj_token,
               String(++fileNameRequestSeq),
-              (message) => chrome.runtime.sendMessage(message),
+              runtimeMessage,
               (request) => activeRequests.track(request),
             );
           } catch (error) {
@@ -1341,7 +1369,7 @@
         const blob = await retryAsync(
           () => fetchBlob(result.url, true, 120000),
           2,
-          sleep,
+          interruptibleWait,
           1000,
           (error) => error.retryable === true,
         );

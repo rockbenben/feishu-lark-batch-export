@@ -70,6 +70,7 @@
   "listSkipped":    { "message": "另有 $1 个文件夹打不开、已跳过，其余内容不受影响：$2" },
   "urlListDone":    { "message": "列出 $1 个链接" },
   "urlInvalidLine": { "message": "−  第 $1 行已跳过：$2" },
+  "urlDeduped":     { "message": "−  忽略 $1 个重复链接（第 $2 行，保留首次出现）" },
   "urlReadFailed":  { "message": "✗  第 $1 行 $2 读取失败：$3" },
   "srcAutoSwitched": { "message": "来源已切到「$1」，它才匹配当前页面" },
   "listFailed":     { "message": "✗  $1" },

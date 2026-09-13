@@ -219,6 +219,7 @@ test('parseUrlText: 忽略空行并保留原始行号', () => {
   assert.deepEqual(parsed.items.map((x) => x.urlToken), ['A', 'B']);
   assert.deepEqual(parsed.errors.map((x) => [x.lineNumber, x.reason]), [[4, 'invalid']]);
   assert.equal(parsed.errors[0].raw, 'not-a-url');
+  assert.deepEqual(parsed.duplicates, []);
 });
 
 test('parseUrlText: 按文档类型和 token 去重并保留首次出现项', () => {
@@ -238,6 +239,11 @@ test('parseUrlText: 按文档类型和 token 去重并保留首次出现项', ()
   ]);
   assert.equal(parsed.items[0].url, `${origin}/docx/A?from=copy`);
   assert.equal(parsed.items[2].url, `${origin}/wiki/A?from=copy`);
+
+  // 被丢掉的行要留下行号和原文，用户才知道 TXT 里哪几条没进来
+  assert.deepEqual(parsed.duplicates.map((d) => d.lineNumber), [2, 5]);
+  assert.equal(parsed.duplicates[0].raw, `${origin}/docx/A#heading`);
+  assert.equal(parsed.duplicates[1].raw, `${origin}/wiki/A#heading`);
 });
 
 test('buildDirectNode: 普通文档使用 URL token 且保留导出字段', () => {
@@ -644,6 +650,30 @@ test('pollBeforeDeadline: 请求耗时计入总时限并限制最后一次请求
   assert.equal(result, null);
   assert.deepEqual(requestTimeouts, [30000, 30000, 30000, 29000]);
   assert.equal(now, 120000);
+});
+
+test('pollBeforeDeadline: 剩余时长不足一次请求时判总超时，不发注定被掐断的请求', async () => {
+  let now = 0;
+  const requestTimeouts = [];
+  const result = await pollBeforeDeadline(
+    async (timeoutMs) => {
+      requestTimeouts.push(timeoutMs);
+      // 请求耗时不落在整秒上，末尾才会剩下不足 1 秒的余数
+      now += 1001;
+      return null;
+    },
+    async (ms) => { now += ms; },
+    () => now,
+    120000,
+  );
+
+  assert.equal(result, null);
+  assert.equal(requestTimeouts.length, 59);
+  for (const timeoutMs of requestTimeouts) {
+    assert.ok(timeoutMs >= 1000, `不该发预算不足 1 秒的请求：${timeoutMs}`);
+  }
+  // 剩 941ms 时直接判总超时，而不是发一次只活 941ms 的请求再报「请求超过 1 秒没有响应」
+  assert.equal(now, 119059);
 });
 
 test('withCleanup: 任务抛错时仍执行清理并保留原始错误', async () => {
