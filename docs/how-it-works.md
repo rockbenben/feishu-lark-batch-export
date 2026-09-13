@@ -43,7 +43,7 @@ Lark 侧复验结论：`/space/api/...` 路径、返回结构、虚拟根返回 
 | 子节点 | `GET /space/api/wiki/v2/tree/get_node_child/?space_id={sid}&wiki_token={wt}&expand_shortcut=true&exclude_fields=5&is_pre_heating=false` → `data[wt]` 是节点数组 |
 | 建导出任务 | `POST /space/api/export/create/`，头 `x-csrftoken: {_csrf_token cookie}`，体 `{token: obj_token, type, file_extension, event_source:'1', need_comment:false, sub_id:''}` → `data.ticket` |
 | 轮询 | `GET /space/api/export/result/{ticket}?token={obj_token}&type={type}` → `data.result.job_status`（`2` 处理中、`0` 成功）、`file_token`、`file_extension` |
-| 下载 | `GET /space/api/box/stream/download/all/{file_token}`，同源 |
+| 下载 | `GET /space/api/box/stream/download/all/{file_token}`；`file` 直链先由后台对同一地址发 `HEAD`，读取最终下载响应的 `Content-Disposition` 原文件名，再由页面发 `GET` 取正文 |
 | 云空间根目录 | `GET /space/api/explorer/v3/my_space/folder/` 和 `/my_space/obj/` —— **文件夹和文档是两个接口**，合起来才是完整的一层 |
 | 云空间子目录 | `GET /space/api/explorer/v3/children/list/?token={folderToken}` |
 | md 内图片 | md 里是 `![Image](https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/authcode/?code=…)`。**跨域**，需要 `host_permissions`；**必须 `withCredentials=false`**（带 cookie 会被 CORS 拒）；code 里的 `…_1785871142:1785957542_V3` 是有效期，**约 24 小时**后失效 |
@@ -91,7 +91,8 @@ TXT 链接来源坚持只做输入适配，不复制导出逻辑：
   `docs`、`sheets`、`base`、`file`。后三者直接映射到已有的 `obj_type=3/8/12`，继续使用
   表格导出、多维表格导出和附件直下逻辑。跨站点、非 HTTPS、未知路径和非法 token
   逐行记日志并附上原始输入，随后跳过；
-  有效 URL 会保留在节点上，解析或导出失败时一并输出。重复链接不去重。
+  有效 URL 会保留在节点上，解析或导出失败时一并输出。同一类型和 token 的重复链接
+  只保留首次出现项，查询参数与锚点不参与判重。
 - `/wiki/<wiki_token>` 必须调用现有 `get_node`，因为真正导出所需的是返回的
   `obj_token` 和 `obj_type`。这不是额外权限预检，而是 wiki token 到文档 token 的必要转换。
   每行 wiki 转换之间 sleep 0.4s（`URL_RESOLVE_DELAY_MS`），直解文档不发请求、不等；
@@ -136,7 +137,8 @@ TXT 链接来源坚持只做输入适配，不复制导出逻辑：
 
 ## 设计要点
 
-- **串行队列**，节点之间 sleep 1.5s，轮询间隔 1s、超时 120s。导出是服务端排队任务，
+- **串行队列**，节点之间 sleep 1.5s，轮询间隔 1s、总超时 120s。每次 API 请求最多等待
+  30 秒，请求耗时也计入轮询总时限。导出是服务端排队任务，
   并发容易触发限频，省下的时间不值当。
 - **最终产物和附件下载只重试临时故障**：单次请求 120 秒超时；网络错误、HTTP 408、
   429 和 5xx 间隔 1 秒重试，最多重试两次；响应带 `Retry-After`（delta 秒）时改听
@@ -144,11 +146,12 @@ TXT 链接来源坚持只做输入适配，不复制导出逻辑：
   重试位于当前队列项内部，不改变串行顺序；创建导出任务与进度轮询不重试。重试过程
   不刷日志，最终失败才记录一条，并附文档或附件的来源 URL。
 - **产物先收集，收尾统一交付**：>1 个文件打成一个 zip，=1 个直接下。既避开 Chrome
-  的「允许下载多个文件」弹窗，也让 md 能带着图片一起走。中途停止则打包已完成的部分。
+  的「允许下载多个文件」弹窗，也让 md 能带着图片一起走。中途停止会中止当前 XHR，
+  取消不会重试或进入失败列表，已完成的部分仍会打包。
 - **zip 手写 STORE 容器**，不引 JSZip。浏览器没有原生 zip（`CompressionStream` 只有
   deflate，不含容器），无构建步骤下引它就得往仓库塞 ~100KB 的 min.js；而导出物
   docx/pdf/xlsx/png 本身已压缩，STORE 的损失可忽略。约 90 行 + CRC32 查表。
-  不支持 zip64（>4GB 或 >65535 个文件会坏）。
+  不支持 zip64；超出 ZIP32 的文件数、名称长度、大小或偏移范围时明确报错，不生成损坏包。
 - **内容始终以 Blob 形式持有**，只在算 CRC 时读一次 ArrayBuffer 随即丢弃，
   所以几百 MB 的批次不会把 JS 堆撑爆。
 - **默认值围绕「尽量保真地镜像知识库」**：图片转本地和保留目录结构默认开
@@ -165,8 +168,8 @@ TXT 链接来源坚持只做输入适配，不复制导出逻辑：
 - **图片目录名另走 `safeSlug`**，比文件名多干掉空格、括号、`#?%&`。真实 stem 形如
   `001-✒️Blog 文章发布-✍️文案`，**带空格** —— 直接拿去拼 `![](…)` 会被空格截断，
   渲染器解析不出来，图就是不显示。中文和 emoji 在 md 链接里没问题，不必编码成一串 `%E6`。
-- **图片目录在批次内用 `uniqueDir` 去重**：同名文档（TXT 刻意保留重复链接，必然出现）
-  不能复用 `safeSlug(stem)` 这个目录 —— zip 会产生重复条目，解压时后一篇的图覆盖前一篇，
+- **图片目录在批次内用 `uniqueDir` 去重**：同名文档不能复用 `safeSlug(stem)` 这个目录
+  —— zip 会产生重复条目，解压时后一篇的图覆盖前一篇，
   两篇 md 的链接又都指向那里，图片就串台了。重名时整段追加 `-2`/`-3`（不能复用
   `uniqueName`：目录没有扩展名，它按最后一个 `.` 切后缀，会把「v1.2 方案」这种标题切开）。
   文件名本身的 `(2)` 去重发生在这之前，两者各用一个 Set。
