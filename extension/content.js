@@ -224,11 +224,18 @@
   function parseUrlText(text, currentOrigin) {
     const items = [];
     const errors = [];
+    const seen = new Set();
     String(text == null ? '' : text).split(/\r?\n/).forEach((raw, i) => {
       const lineNumber = i + 1;
       const line = raw.replace(/^\uFEFF/, '').trim();
       if (!line) return;
-      try { items.push({ ...parseDocumentUrl(line, currentOrigin), lineNumber }); }
+      try {
+        const item = parseDocumentUrl(line, currentOrigin);
+        const key = `${item.kind}:${item.urlToken}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        items.push({ ...item, lineNumber });
+      }
       catch (e) { errors.push({ lineNumber, raw: line, reason: e.message }); }
     });
     return { items, errors };
@@ -273,6 +280,52 @@
       ? name.slice(0, -suffix.length) : name;
   }
 
+  function filenameFromContentDisposition(header) {
+    const value = String(header || '');
+    const extended = value.match(
+      /(?:^|;)\s*filename\*\s*=\s*(?:"([^"]*)"|([^;]*))/i,
+    );
+    const basic = value.match(/(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]*))/i);
+    const decode = (match, rawFallback, stripCharset) => {
+      if (!match) return '';
+      const raw = String(match[1] ?? match[2]).trim();
+      const encoded = stripCharset ? raw.replace(/^[^']*'[^']*'/, '') : raw;
+      try { return decodeURIComponent(encoded); }
+      catch (error) {
+        if (!(error instanceof URIError)) throw error;
+        return rawFallback ? encoded : '';
+      }
+    };
+    return decode(extended, false, true) || decode(basic, true, false);
+  }
+
+  function titleFromDownload(fallbackTitle, exportFileName, responseFileName, ext) {
+    return titleFromExportResult(
+      fallbackTitle,
+      ext === null ? responseFileName : exportFileName,
+      ext,
+    );
+  }
+
+  async function requestAttachmentFilename(token, requestId, sendMessage, trackRequest) {
+    const release = trackRequest({
+      async abort() {
+        try { await sendMessage({ type: 'fbe-file-name-cancel', requestId }); }
+        catch (error) { console.warn('Failed to cancel attachment filename request', error); }
+      },
+    });
+    try {
+      const response = await sendMessage({ type: 'fbe-file-name', token, requestId });
+      if (!response) throw new Error('file name response missing');
+      if (response.error) throw new Error(response.error);
+      const fileName = filenameFromContentDisposition(response.contentDisposition);
+      if (!fileName) throw new Error('Content-Disposition filename missing');
+      return fileName;
+    } finally {
+      release();
+    }
+  }
+
   // 小于 1 MB 时显示 KB。几个 md 文件本来就到不了 1 MB，
   // 报「0.0 MB」看着像是什么都没导出来。单位不用翻译。
   function formatSize(bytes) {
@@ -297,7 +350,7 @@
     for (let attempt = 0; ; attempt++) {
       try { return await task(); }
       catch (e) {
-        if (attempt >= retryCount || !shouldRetry(e)) throw e;
+        if ((e && e.cancelled) || attempt >= retryCount || !shouldRetry(e)) throw e;
         // 429/503 响应若带了 Retry-After（delta 秒）就听服务端的，封顶 30 秒；
         // 没有或不合法才用固定间隔，防网关/图床明确说了要等却还在 1 秒后撞上去。
         const after = Number(e && e.retryAfterMs);
@@ -305,6 +358,69 @@
         await wait(delay);
       }
     }
+  }
+
+  function createRequestTracker() {
+    const active = new Set();
+    return {
+      track(request) {
+        active.add(request);
+        return () => active.delete(request);
+      },
+      abortAll() {
+        const requests = [...active];
+        active.clear();
+        for (const request of requests) request.abort();
+      },
+    };
+  }
+
+  // check 返回 null 表示仍在处理，否则返回最终结果。单次请求最多等 30 秒，
+  // 但最后一次只能使用总截止时间内剩余的时长。
+  async function pollBeforeDeadline(check, wait, now, deadline) {
+    while (true) {
+      const beforeWait = deadline - now();
+      if (beforeWait <= 0) return null;
+      await wait(Math.min(1000, beforeWait));
+
+      const remaining = deadline - now();
+      if (remaining <= 0) return null;
+      const result = await check(Math.min(30000, remaining));
+      if (result !== null) return result;
+    }
+  }
+
+  async function withCleanup(task, cleanup) {
+    try { return await task(); }
+    finally { cleanup(); }
+  }
+
+  // 云空间分页必须读到 has_more=false 才算完整。游标缺失、重复或页数异常时抛错，
+  // 不能把已经读到的部分误当成完整列表交给后续导出。
+  async function collectDrivePages(fetchPage, maxPages = 1000) {
+    const out = [];
+    const seenLabels = new Set();
+    let label = '';
+
+    for (let page = 0; page < maxPages; page++) {
+      const data = await fetchPage(label);
+      const nodes = (data.entities && data.entities.nodes) || {};
+      for (const token of data.node_list || []) if (nodes[token]) out.push(nodes[token]);
+      if (!data.has_more) return out;
+
+      const nextLabel = String(data.last_label || '');
+      if (!nextLabel || nextLabel === label || seenLabels.has(nextLabel)) {
+        const error = new Error('drive pagination cursor did not advance');
+        error.code = 'drive_pagination_cursor';
+        throw error;
+      }
+      seenLabels.add(nextLabel);
+      label = nextLabel;
+    }
+
+    const error = new Error(`drive pagination exceeded ${maxPages} pages`);
+    error.code = 'drive_pagination_limit';
+    throw error;
   }
 
   const isRetryableDownloadStatus = (status) =>
@@ -328,8 +444,8 @@
 
   // 图片目录去重。不能复用 uniqueName：目录没有扩展名，而 uniqueName 会把最后一个 '.'
   // 之后整段当扩展名（标题里的点很常见，如「v1.2 方案」），序号会插进名字中间。
-  // 同名文档（URL 列表刻意保留重复链接，这种情况必然出现）共用 assets 目录时，
-  // zip 里会出现重复条目，解压后一篇的图覆盖另一篇 —— 所以目录也必须唯一。
+  // 同名文档共用 assets 目录时，zip 里会出现重复条目，解压后一篇的图覆盖另一篇
+  // —— 所以目录也必须唯一。
   function uniqueDir(name, used) {
     if (!used.has(name)) { used.add(name); return name; }
     for (let i = 2; ; i++) {
@@ -414,14 +530,40 @@
   // 文件内容始终以 Blob 形式传递，不进 JS 堆 —— 几百 MB 的批次靠这个撑住。
   function zipParts(entries, date = new Date()) {
     const enc = new TextEncoder();
+    const uint16Max = 0xffff;
+    const uint32Max = 0xffffffff;
+    const limitError = (detail) => {
+      const error = new RangeError(`ZIP32 limit exceeded: ${detail}`);
+      error.code = 'zip_limit';
+      return error;
+    };
+    if (entries.length > uint16Max) throw limitError('entry count');
+
+    // 先校验再写任何头部，避免 DataView 将超范围数值静默截断成损坏的 ZIP。
+    const prepared = [];
+    let checkedOffset = 0;
+    let checkedCentralSize = 0;
+    for (const entry of entries) {
+      const name = enc.encode(entry.path);
+      if (name.length > uint16Max) throw limitError('file name');
+      if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > uint32Max) {
+        throw limitError('file size');
+      }
+      checkedOffset += 30 + name.length + entry.size;
+      if (checkedOffset > uint32Max) throw limitError('central directory offset');
+      checkedCentralSize += 46 + name.length;
+      if (checkedCentralSize > uint32Max) throw limitError('central directory size');
+      prepared.push({ entry, name });
+    }
+    if (checkedOffset + checkedCentralSize + 22 > uint32Max) throw limitError('archive size');
+
     const dosTime = ((date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1)) & 0xffff;
     const dosDate = (((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate()) & 0xffff;
     const parts = [];
     const central = [];
     let offset = 0;
 
-    for (const e of entries) {
-      const name = enc.encode(e.path);
+    for (const { entry: e, name } of prepared) {
       const local = new DataView(new ArrayBuffer(30));
       local.setUint32(0, 0x04034b50, true);
       local.setUint16(4, 20, true);
@@ -453,12 +595,11 @@
       offset += 30 + name.length + e.size;
     }
 
-    const cdSize = central.reduce((n, p) => n + p.byteLength, 0);
     const eocd = new DataView(new ArrayBuffer(22));
     eocd.setUint32(0, 0x06054b50, true);
     eocd.setUint16(8, entries.length, true);
     eocd.setUint16(10, entries.length, true);
-    eocd.setUint32(12, cdSize, true);
+    eocd.setUint32(12, checkedCentralSize, true);
     eocd.setUint32(16, offset, true);
     return parts.concat(central, [eocd.buffer]);
   }
@@ -471,8 +612,11 @@
       formatSize, readCookie,
       wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
       parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
-      normalizeExportResult, titleFromExportResult, copyLogText, appendSourceUrl, retryAsync,
-      isRetryableDownloadStatus, sourceUrlForNode,
+      normalizeExportResult, titleFromExportResult, titleFromDownload, filenameFromContentDisposition,
+      requestAttachmentFilename,
+      copyLogText, appendSourceUrl, retryAsync, withCleanup,
+      createRequestTracker, pollBeforeDeadline,
+      isRetryableDownloadStatus, sourceUrlForNode, collectDrivePages,
     };
   }
   if (typeof document === 'undefined') return; // Node 里跑测试时到此为止
@@ -484,9 +628,19 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // URL 列表里每行 wiki 都要单独打一次 get_node，行与行之间留的间隔。
   const URL_RESOLVE_DELAY_MS = 400;
+  const API_TIMEOUT_MS = 30000;
+  const activeRequests = createRequestTracker();
+  let fileNameRequestSeq = 0;
 
   // 取错这个 cookie 的症状是「文档能列出来、一篇也导不出」：列表全是 GET，不带这个头。
   const csrf = () => readCookie(document.cookie, '_csrf_token');
+
+  function cancelledError() {
+    const error = new Error(t('stopped'));
+    error.cancelled = true;
+    error.retryable = false;
+    return error;
+  }
 
   // ── 文案 ──
   // 默认跟随浏览器语言（chrome.i18n）。手动指定语言时只能自己把 messages.json 读进来
@@ -528,16 +682,25 @@
     (TYPES[objType] ? t(TYPES[objType].key) : t('typeUnknown', objType));
 
   // 飞书的 policy-sdk 劫持了 window.fetch，自发的 fetch 一律 Failed to fetch。必须用 XHR。
-  function xhr(method, url, body) {
+  function xhr(method, url, body, timeoutMs = API_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
       x.open(method, url, true);
       x.withCredentials = true;
+      x.timeout = timeoutMs;
       if (body) {
         x.setRequestHeader('Content-Type', 'application/json');
         x.setRequestHeader('x-csrftoken', csrf());
       }
-      x.onload = () => {
+      const release = activeRequests.track(x);
+      let settled = false;
+      const settle = (complete) => {
+        if (settled) return;
+        settled = true;
+        release();
+        complete();
+      };
+      x.onload = () => settle(() => {
         try { resolve(JSON.parse(x.responseText)); }
         catch (e) {
           // 带上响应体。业务错误是 HTTP 200 + JSON 里的 code，走不到这儿；
@@ -546,9 +709,16 @@
           reject(new Error(t('errNotJson', x.status,
             (x.responseText || '').replace(/\s+/g, ' ').trim().slice(0, 200))));
         }
-      };
-      x.onerror = () => reject(new Error(t('errNetwork')));
-      x.send(body ? JSON.stringify(body) : null);
+      });
+      x.onerror = () => settle(() => reject(new Error(t('errNetwork'))));
+      x.ontimeout = () => settle(() => {
+        const error = new Error(t('errRequestTimeout', Math.ceil(timeoutMs / 1000)));
+        error.timedOut = true;
+        reject(error);
+      });
+      x.onabort = () => settle(() => reject(cancelledError()));
+      try { x.send(body ? JSON.stringify(body) : null); }
+      catch (error) { settle(() => reject(error)); }
     });
   }
 
@@ -602,20 +772,19 @@
   // 实测：参数越少越好，加 type/rank 那些反而 500。node_list 才是真正的子项，
   // entities.nodes 里还混着父节点自己。分页靠 has_more + last_label。
   async function driveList(path, extra = '') {
-    const out = [];
-    let label = '';
-    for (let page = 0; page < 40; page++) {
-      const url = `${API}/explorer/v3/${path}?length=50${extra}`
-        + (label ? `&last_label=${encodeURIComponent(label)}` : '');
-      const r = await xhr('GET', url);
-      if (r.code !== 0) throw new Error(t('errReadDrive', `${r.code} ${r.msg || ''}`));
-      const d = r.data || {};
-      const nodes = (d.entities && d.entities.nodes) || {};
-      for (const token of d.node_list || []) if (nodes[token]) out.push(nodes[token]);
-      if (!d.has_more || !d.last_label || d.last_label === label) break; // 游标不前进就停，别死循环
-      label = d.last_label;
+    try {
+      return await collectDrivePages(async (label) => {
+        const url = `${API}/explorer/v3/${path}?length=50${extra}`
+          + (label ? `&last_label=${encodeURIComponent(label)}` : '');
+        const r = await xhr('GET', url);
+        if (r.code !== 0) throw new Error(t('errReadDrive', `${r.code} ${r.msg || ''}`));
+        return r.data || {};
+      });
+    } catch (error) {
+      if (error.code === 'drive_pagination_cursor') throw new Error(t('errDrivePaginationCursor'));
+      if (error.code === 'drive_pagination_limit') throw new Error(t('errDrivePaginationLimit'));
+      throw error;
     }
-    return out;
   }
 
   async function getChildren(spaceId, wikiToken) {
@@ -626,7 +795,7 @@
     return (r.data && r.data[wikiToken]) || [];
   }
 
-  // 返回 {url, ext}。ext 为 null 表示文件名沿用节点标题（附件本来就带后缀）。
+  // 返回下载信息。ext 为 null 表示附件直下，文件名稍后从下载响应头取得。
   async function exportOne(node, fmt, needComment) {
     if (fmt.api === null) return { url: `${API}/box/stream/download/all/${node.obj_token}`, ext: null };
 
@@ -638,31 +807,46 @@
 
     const ticket = created.data.ticket;
     const query = `${API}/export/result/${ticket}?token=${node.obj_token}&type=${fmt.api}`;
-    for (let i = 0; i < 120; i++) {
-      await sleep(1000);
-      const r = await xhr('GET', query);
+    const ready = await pollBeforeDeadline(async (timeoutMs) => {
+      if (stopped) throw cancelledError();
+      const r = await xhr('GET', query, null, timeoutMs);
       if (r.code !== 0) throw new Error(t('errQuery', `${r.code} ${r.msg || ''}`));
       const res = (r.data && r.data.result) || {};
       if (res.job_status === 0) {
-        const ready = normalizeExportResult(res, fmt.ext);
+        const result = normalizeExportResult(res, fmt.ext);
         return {
-          url: `${API}/box/stream/download/all/${ready.fileToken}`,
-          ext: ready.ext,
-          fileName: ready.fileName,
+          url: `${API}/box/stream/download/all/${result.fileToken}`,
+          ext: result.ext,
+          fileName: result.fileName,
         };
       }
       // 1/2 = 排队中/处理中；其余非零一律当失败
       if (res.job_status !== 1 && res.job_status !== 2) {
         throw new Error(res.job_error_msg || t('errExport', res.job_status));
       }
-    }
-    throw new Error(t('errTimeout'));
+      return null;
+    }, sleep, Date.now, Date.now() + 120000);
+    if (!ready) throw new Error(t('errTimeout'));
+    return ready;
   }
 
   // 图片那些 authcode 链接实测必须 withCredentials=false —— 带 cookie 会被 CORS 拒。
   function fetchBlob(url, withCredentials = true, timeoutMs = 0) {
+    if (stopped) return Promise.reject(cancelledError());
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
+      x.open('GET', url, true);
+      x.withCredentials = withCredentials;
+      x.timeout = timeoutMs;
+      x.responseType = 'blob';
+      const release = activeRequests.track(x);
+      let settled = false;
+      const settle = (complete) => {
+        if (settled) return;
+        settled = true;
+        release();
+        complete();
+      };
       const fail = (message, retryable) => {
         const error = new Error(message);
         error.retryable = retryable;
@@ -671,18 +855,16 @@
           const after = Number(x.getResponseHeader('Retry-After'));
           if (Number.isFinite(after) && after > 0) error.retryAfterMs = Math.min(after, 30) * 1000;
         }
-        reject(error);
+        settle(() => reject(error));
       };
-      x.open('GET', url, true);
-      x.withCredentials = withCredentials;
-      x.timeout = timeoutMs;
-      x.responseType = 'blob';
       x.onload = () => (x.status === 200
-        ? resolve(x.response)
+        ? settle(() => resolve(x.response))
         : fail(`HTTP ${x.status}`, isRetryableDownloadStatus(x.status)));
       x.onerror = () => fail(t('errNetwork'), true);
       x.ontimeout = () => fail(t('errNetwork'), true);
-      x.send();
+      x.onabort = () => settle(() => reject(cancelledError()));
+      try { x.send(); }
+      catch (error) { settle(() => reject(error)); }
     });
   }
 
@@ -712,6 +894,7 @@
         mapping[url] = rel;
         entries.push(await toEntry(dirPrefix + rel, blob));
       } catch (e) {
+        if (e && e.cancelled) throw e;
         log(appendSourceUrl(t('imgFailed', e.message), url));
       }
     }
@@ -1088,7 +1271,17 @@
     }
   }
 
-  async function run(items) {
+  function finishRun(items, startedAt) {
+    running = false;
+    setProgress(items.length, items.length, Date.now() - startedAt);
+    $('fbe-stop').hidden = true;
+    $('fbe-scan').disabled = false;
+    $('fbe-retry').hidden = failed.length === 0;
+    $('fbe-retry').textContent = t('btnRetry', failed.length); // 说清楚要重试几篇
+    refreshCount();
+  }
+
+  async function run(items, startedAt = Date.now()) {
     running = true;
     stopped = false;
     failed = [];
@@ -1113,7 +1306,6 @@
     const used = new Set();
     const usedImgDirs = new Set();
     const seq = new Map();
-    const startedAt = Date.now();
     const files = [];   // {path, blob, crc, size}
 
     for (let i = 0; i < items.length; i++) {
@@ -1129,11 +1321,21 @@
 
         const result = await exportOne(node, fmt, needComment);
         const dirPrefix = buildDirPrefix(path, keepTree);
-        const title = titleFromExportResult(node.title, result.fileName, result.ext);
-        const stem = buildStem(nextSeq(seq, dirPrefix), path[path.length - 1], title, nameOpts);
-        const plainName = withExt(stem, result.ext);
-        const tokenName = addTokenToFilename(plainName, node.url_token, nameOpts.token);
-        const name = uniqueName(dirPrefix + tokenName, used);
+        const index = nextSeq(seq, dirPrefix);
+        let responseFileName = '';
+        if (result.ext === null && (!node.title || node.title === node.obj_token)) {
+          try {
+            responseFileName = await requestAttachmentFilename(
+              node.obj_token,
+              String(++fileNameRequestSeq),
+              (message) => chrome.runtime.sendMessage(message),
+              (request) => activeRequests.track(request),
+            );
+          } catch (error) {
+            if (stopped) throw cancelledError();
+            log(appendSourceUrl(t('fileNameFallback', error.message), node.source_url));
+          }
+        }
         // 最终产物和附件共用这个入口。只重试网络错误、408、429 与 5xx；
         // 权限、链接不存在等确定性 4xx 立即失败，避免无意义等待。
         const blob = await retryAsync(
@@ -1143,10 +1345,14 @@
           1000,
           (error) => error.retryable === true,
         );
+        const title = titleFromDownload(node.title, result.fileName, responseFileName, result.ext);
+        const stem = buildStem(index, path[path.length - 1], title, nameOpts);
+        const plainName = withExt(stem, result.ext);
+        const tokenName = addTokenToFilename(plainName, node.url_token, nameOpts.token);
+        const name = uniqueName(dirPrefix + tokenName, used);
 
         if (withImages && result.ext === 'md') {
-          // 目录在去重后的集合上分配：同名的两篇文档（或同一链接出现两次）
-          // 不能落到同一个 assets 子目录，否则 zip 条目互相覆盖、图片串台。
+          // 同名文档不能落到同一个 assets 子目录，否则 zip 条目互相覆盖、图片串台。
           const imgDir = uniqueDir(safeSlug(stem), usedImgDirs);
           const localized = await localizeImages(await blob.text(), imgDir, dirPrefix);
           files.push(await toEntry(name, new Blob([localized.md], { type: 'text/markdown' })));
@@ -1157,6 +1363,7 @@
           log(t('okPlain', name));
         }
       } catch (e) {
+        if (e && e.cancelled && stopped) { log(t('stopped')); break; }
         failed.push(items[i]);
         log(appendSourceUrl(t('itemFailed', node.title, e.message), node.source_url));
       }
@@ -1177,14 +1384,19 @@
       log(t('doneNothing'));
     }
     if (failed.length) log(t('summaryFailed', failed.length));
+  }
 
-    running = false;
-    setProgress(items.length, items.length, Date.now() - startedAt);
-    $('fbe-stop').hidden = true;
-    $('fbe-scan').disabled = false;
-    $('fbe-retry').hidden = failed.length === 0;
-    $('fbe-retry').textContent = t('btnRetry', failed.length); // 说清楚要重试几篇
-    refreshCount();
+  async function runSafely(items) {
+    const startedAt = Date.now();
+    try {
+      await withCleanup(
+        () => run(items, startedAt),
+        () => finishRun(items, startedAt),
+      );
+    } catch (e) {
+      const detail = e && e.code === 'zip_limit' ? t('errZipLimit') : ((e && e.message) || String(e));
+      log(t('batchFailed', detail));
+    }
   }
 
   // 右下角是飞书自己的地盘：文档页有两个悬浮按钮，表格页因为底部多了状态栏，
@@ -1400,9 +1612,13 @@
       refreshMarks();
       refreshCount();
     };
-    $('fbe-start').onclick = () => run(checkboxes().flatMap((c, i) => (c.checked ? [rows[i]] : [])));
-    $('fbe-stop').onclick = () => { stopped = true; $('fbe-stop').disabled = true; };
-    $('fbe-retry').onclick = () => run(failed.slice());
+    $('fbe-start').onclick = () => runSafely(checkboxes().flatMap((c, i) => (c.checked ? [rows[i]] : [])));
+    $('fbe-stop').onclick = () => {
+      stopped = true;
+      $('fbe-stop').disabled = true;
+      activeRequests.abortAll();
+    };
+    $('fbe-retry').onclick = () => runSafely(failed.slice());
     $('fbe-log-copy').onclick = copyCurrentLog;
     $('fbe-lang').onchange = async (e) => {
       await loadLocale(e.target.value);

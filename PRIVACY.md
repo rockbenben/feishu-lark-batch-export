@@ -10,7 +10,7 @@
 
 | 行为 | 说明 |
 | --- | --- |
-| 调用飞书 / Lark 的网页接口 | 用你浏览器里**已有的登录态**，调用飞书自己的接口列出文档、创建导出任务、下载产物。域名限于 `*.feishu.cn` 和 `*.larksuite.com` |
+| 调用飞书 / Lark 的网页接口 | 用你浏览器里**已有的登录态**，调用飞书自己的接口列出文档、创建导出任务、读取附件原文件名并下载产物。域名限于 `*.feishu.cn` 和 `*.larksuite.com` |
 | 读取一个 Cookie 值 | 只读 `_csrf_token`，飞书的接口要求把它放进请求头。这个值不会离开当前页面 |
 | 抓取文档里的图片 | 导出 Markdown 时，从飞书的图床把图片取回来放进 zip。这些链接约 24 小时后失效，所以必须存到本地 |
 | 存少量设置 | 格式、几个开关、面板语言、悬浮按钮位置，存在页面的 `localStorage` 里。都是你自己的选择，不含文档内容 |
@@ -37,7 +37,7 @@
 
 | Action | Detail |
 | --- | --- |
-| Calls Feishu / Lark web APIs | Uses the session **already present in your browser** to list documents, create export jobs and download the results. Restricted to `*.feishu.cn` and `*.larksuite.com` |
+| Calls Feishu / Lark web APIs | Uses the session **already present in your browser** to list documents, create export jobs, read original attachment filenames and download the results. Restricted to `*.feishu.cn` and `*.larksuite.com` |
 | Reads one cookie value | Only `_csrf_token`, which Feishu's API requires in a request header. The value never leaves the page |
 | Fetches images from documents | When exporting Markdown, images are pulled into the zip. Their links expire in about 24 hours, so saving them locally is the point |
 | Stores a few settings | Format, a few toggles, panel language and the floating button's position, in the page's `localStorage`. Your choices only — no document content |

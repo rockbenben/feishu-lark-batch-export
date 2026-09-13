@@ -34,7 +34,7 @@
 
 **`host_permissions: https://*.feishu.cn/*`、`https://*.larksuite.com/*`**
 
-> 扩展需要在飞书 / Lark 的文档页面上运行，以读取用户有权访问的文档目录树，并调用飞书自己的导出接口。图片托管在同一集团的独立子域（如 `internal-api-drive-stream.feishu.cn`、`internal-api-drive-stream-jp.larksuite.com`），导出 Markdown 时需要跨子域取回图片，因此按域名整体声明。范围仅限这两个域，不含任何其它站点。
+> 扩展需要在飞书 / Lark 的文档页面上运行，以读取用户有权访问的文档目录树，并调用飞书自己的导出接口。图片和附件下载响应托管在同一集团的独立子域（如 `internal-api-drive-stream.feishu.cn`、`internal-api-drive-stream-jp.larksuite.com`）；导出 Markdown 时需要跨子域取回图片，直接下载附件时需要读取原文件名，因此按域名整体声明。范围仅限这两个域，不含任何其它站点。
 
 **没有申请任何 `permissions`。** 不用 `storage`（设置存在页面的 localStorage）、不用 `downloads`（用 `<a download>` 触发）、不用 `tabs`（`chrome.tabs.sendMessage` 只用回调里给的 `tab.id`，不读取标签页属性）。
 
