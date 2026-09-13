@@ -52,14 +52,16 @@ jobs:
           unzip -Z1 "$zip" | grep -qx 'manifest.json' \
             || { echo "::error::manifest.json 不在 zip 根目录，商店会拒"; exit 1; }
 
-      # 只能给一种 notes：--notes-file 和 --generate-notes 同时给，gh 会直接报错退出。
-      # 选自己写的安装说明 —— 对装扩展的人比一串 commit 列表有用。
+      # 安装步骤对装扩展的人最实用，所以放最前面；「本次变更」和「贡献者」交给
+      # --generate-notes —— 比手写准，也不会漏掉没署名的贡献者。
+      # 分 create / edit 两步：--generate-notes 和 --notes-file 不能同时用，
+      # 而且 --generate-notes 只在 create 上有，edit 没有。
       - name: 建 Release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cat > notes.md <<'EOF'
+          cat > install-notes.md <<'EOF'
           下载下面的 zip 并解压，然后：
 
           1. 打开 `chrome://extensions`，右上角开启**开发者模式**
@@ -68,7 +70,16 @@ jobs:
 
           用法见 [README](https://github.com/rockbenben/feishu-lark-batch-export#用法)。
           EOF
+
           gh release create "$GITHUB_REF_NAME" \
             "feishu-lark-batch-export-${GITHUB_REF_NAME}.zip" \
             --title "$GITHUB_REF_NAME" \
-            --notes-file notes.md
+            --generate-notes
+
+          {
+            cat install-notes.md
+            printf '\n---\n\n'
+            gh release view "$GITHUB_REF_NAME" --json body --jq .body
+          } > notes.md
+
+          gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
