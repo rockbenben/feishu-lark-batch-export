@@ -10,7 +10,7 @@ const backgroundSrc = readFileSync(new URL('./extension/background.js', import.m
 const mod = { exports: {} };
 new Function('module', src)(mod);
 const {
-  pickFormat, sanitizeName, uniqueName, uniqueDir, flatten, findSpaceRoot,
+  pickFormat, sanitizeName, uniqueName, uniqueDir, imageDirName, flatten, findSpaceRoot,
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
   descendantEnd, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
   withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
@@ -1162,6 +1162,21 @@ test('uniqueDir: 同名图片目录整段追加序号，不把标题里的点当
   used.add('季度报告');
   used.add('季度报告-2');
   assert.equal(uniqueDir('季度报告', used), '季度报告-3');
+});
+
+test('imageDirName: 图片目录按 token 隔离，标题、序号都不参与', () => {
+  const node = { url_token: 'wikcnAbC123', obj_token: 'doxcnXyZ789', title: '笔记' };
+  assert.equal(imageDirName(node, '001-父目录-笔记'), 'wikcnAbC123');
+  // 序号、父目录变了，目录名不变 —— 重导时同一篇永远落同一个目录
+  assert.equal(imageDirName(node, '002-别的-笔记'), 'wikcnAbC123');
+  // 两篇同名文档 token 不同 ⇒ 目录天然不同，不依赖 uniqueDir 的 -2 后缀
+  assert.notEqual(imageDirName({ url_token: 'wikcnOther' }, '笔记'), imageDirName(node, '笔记'));
+});
+
+test('imageDirName: url_token 缺失退 obj_token，都没有才退标题 slug', () => {
+  assert.equal(imageDirName({ obj_token: 'doxcnXyZ789' }, '笔记'), 'doxcnXyZ789');
+  assert.equal(imageDirName({}, 'v1.2 方案'), 'v1.2_方案');
+  assert.equal(imageDirName(null, '笔记'), '笔记');
 });
 
 test('flatten: 深度优先，后代是紧随其后 depth 更大的连续一段', () => {

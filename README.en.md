@@ -86,11 +86,11 @@ Under **More settings**. The defaults aim at one thing: **mirror the wiki faithf
 | Save comments too | off | Most people want the body text — but discussion threads often hold conclusions that live nowhere else |
 | Number filenames | off | Clean `Title.md` wins. Turn it on to preserve the wiki's ordering |
 | Prefix parent folder | off | Redundant while folder structure is on. For flat exports that need disambiguating |
-| Add unique document ID to filename | off | Adds the document's unique ID to the exported filename, such as `Title-doxcnAbC123.md` |
+| Add unique document ID to filename | on | Adds the document's unique ID to the exported filename, such as `Title-doxcnAbC123.md` |
 
 Settings are remembered. Numbering **restarts inside each folder** when folder structure is on, so you never get a folder containing `007`, `019` — a flat export falls back to one global sequence.
 
-**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc name>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Each image request times out after 15 seconds and retries up to twice, waiting one second between attempts. Only a final failure adds one log entry with the image URL; the Markdown keeps the original link rather than rewriting it to something broken. Same-titled documents in one batch get image folders with `-2`, `-3` suffixes so images never overwrite each other inside the zip.
+**Save images too** is independent of the format dropdown: whenever a document's output is `.md`, its images are fetched into `assets/<doc token>/001.png` and the links are rewritten to relative paths — so the Auto format gets images too. docx / pdf / xlsx are binary; the images are already inside the file and there is nothing to rewrite. Each image request times out after 15 seconds and retries up to twice, waiting one second between attempts. Only a final failure adds one log entry with the image URL; the Markdown keeps the original link rather than rewriting it to something broken. Image folders are keyed by document token, not title or number: same-titled documents never share a folder, and re-exporting a document always lands in the same one.
 
 ## What it can export
 
