@@ -448,10 +448,19 @@
     }
   }
 
-  // 图片目录去重。不能复用 uniqueName：目录没有扩展名，而 uniqueName 会把最后一个 '.'
+  // 图片目录按文档 token 隔离，而不是按标题：标题会重名、序号会随勾选范围变、
+  // 批内 -2/-3 后缀又依赖遍历顺序，重导一次目录就对不上，解压到同一处时图片串台。
+  // token 是 URL 最后一段（[A-Za-z0-9]），本来就能安全出现在 md 链接里；
+  // 拿不到 token 时才退回旧的 safeSlug(stem)。
+  function imageDirName(node, stem) {
+    const token = String((node && (node.url_token || node.obj_token)) || '').trim();
+    return safeSlug(token || stem);
+  }
+
+  // 图片目录去重兜底。token 正常情况下唯一，不会触发；退回标题时才可能重名。
+  // 不能复用 uniqueName：目录没有扩展名，而 uniqueName 会把最后一个 '.'
   // 之后整段当扩展名（标题里的点很常见，如「v1.2 方案」），序号会插进名字中间。
-  // 同名文档共用 assets 目录时，zip 里会出现重复条目，解压后一篇的图覆盖另一篇
-  // —— 所以目录也必须唯一。
+  // 两篇共用一个 assets 目录时 zip 里会出现重复条目，解压后一篇的图覆盖另一篇。
   function uniqueDir(name, used) {
     if (!used.has(name)) { used.add(name); return name; }
     for (let i = 2; ; i++) {
@@ -612,7 +621,7 @@
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
-      pickFormat, sanitizeName, uniqueName, uniqueDir, flatten, findSpaceRoot, TYPES,
+      pickFormat, sanitizeName, uniqueName, uniqueDir, imageDirName, flatten, findSpaceRoot, TYPES,
       crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem, descendantEnd,
       buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, addTokenToFilename,
       formatSize, readCookie,
@@ -903,8 +912,8 @@
   }
 
   // 图片放在 md 同级的 assets/ 下，所以 md 里写的相对链接跟目录深度无关，
-  // 开不开「保留目录结构」都不用改写成 ../../ 那种东西。dir 由调用方用
-  // uniqueDir 保证同批次唯一，重名文档不能共用一个图片目录。
+  // 开不开「保留目录结构」都不用改写成 ../../ 那种东西。dir 由调用方按文档 token
+  // 生成（imageDirName），一篇文档永远对应同一个图片目录，不同文档不共用。
   async function localizeImages(md, dir, dirPrefix) {
     const urls = mdImageUrls(md);
     const mapping = {};   // url → md 里的相对链接
@@ -1380,8 +1389,8 @@
         const name = uniqueName(dirPrefix + tokenName, used);
 
         if (withImages && result.ext === 'md') {
-          // 同名文档不能落到同一个 assets 子目录，否则 zip 条目互相覆盖、图片串台。
-          const imgDir = uniqueDir(safeSlug(stem), usedImgDirs);
+          // 图片目录按 token 隔离；uniqueDir 只在退回标题命名时兜底去重。
+          const imgDir = uniqueDir(imageDirName(node, stem), usedImgDirs);
           const localized = await localizeImages(await blob.text(), imgDir, dirPrefix);
           files.push(await toEntry(name, new Blob([localized.md], { type: 'text/markdown' })));
           files.push(...localized.entries);
@@ -1560,7 +1569,7 @@
           <span>${t('optNum')}<em>${t('optNumTip')}</em></span></label>
         <label class="fbe-opt"><input type="checkbox" id="fbe-parent">
           <span>${t('optParent')}<em>${t('optParentTip')}</em></span></label>
-        <label class="fbe-opt"><input type="checkbox" id="fbe-token">
+        <label class="fbe-opt"><input type="checkbox" id="fbe-token" checked>
           <span>${t('optToken')}<em>${t('optTokenTip')}</em></span></label>
         <p id="fbe-hint">${t('hintCascade')}<br>${t('hintTri')}</p>
       </details>
