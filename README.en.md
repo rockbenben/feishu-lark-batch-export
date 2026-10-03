@@ -49,16 +49,16 @@ Notes on URL lists:
 
 - Listing does not open each page. Plain documents are shown by ID first and get Feishu's real title after a successful export; wiki links need one API call each to convert the token, 0.4 s apart, so long lists take a while.
 - Direct file links fetch the original filename first and fall back to the ID when it cannot be read.
-- Links carry no modification time, so the **Recently edited** selector does not apply to TXT rows; check them manually.
+- Links carry no modification time, so the **Select by edit time** menu does not apply to TXT rows; check them manually.
 - Entries that are missing, inaccessible, or malformed keep their link in the log and the rest continue; if every link fails, an explicit error is shown.
 
 ### 2. Check what to export
 
-Checking a folder **checks everything under it**; **Alt-click** affects only that row. A dash in the box means the row itself is unchecked but something under it is checked — the dash itself never exports anything.
+Checking a row with children **checks everything under it**; **Alt-click** affects only that row. A dash in the box means the row itself is unchecked but something under it is checked — the dash itself never exports anything.
 
 Types that cannot be exported (mindnotes) are disabled and cannot be checked.
 
-**Recently edited** checks everything changed in the last 7 / 30 / 90 days, which suits incremental backups.
+**Select by edit time** checks everything changed in the last 7 / 30 / 90 days, which suits incremental backups.
 
 ### 3. Pick a format and export
 
@@ -111,7 +111,7 @@ So the `.mm` file is serialised in the frontend from the in-memory document mode
 
 - **Exports run serially, 1.5 s apart.** Export is a queued job on Feishu's side and concurrency invites rate limiting. Allow a few minutes for a few dozen documents. The interval is a conservative estimate — the real threshold was not measured — and is currently a code constant, not a setting.
 - **Packing uses memory.** Everything is collected before zipping. Content is held as Blobs rather than in the JS heap, so batches of a few hundred MB are fine; there is no zip64, and exceeding ZIP32 limits (file count, size, offsets) reports an error instead of producing a corrupt archive. The zip uses STORE with no compression — docx / pdf / xlsx / png are already compressed.
-- A failed document does not stop the queue; it gets one log line, and a **Retry N that failed** button appears afterwards.
+- A failed document does not stop the queue; it gets one log line, and a **Retry N failed** button appears afterwards.
 - The extension only uses the session already in your browser to call Feishu's own web endpoints. **Nothing is uploaded and there is no server.** The background script only forwards toolbar clicks, reads locale files, and reads original filenames for direct file links. See [`PRIVACY.md`](PRIVACY.md).
 - These are Feishu's internal endpoints, so a redesign can break them. Endpoint details and the measured type matrix are in [`docs/how-it-works.md`](docs/how-it-works.md) for comparison when fixing.
 
