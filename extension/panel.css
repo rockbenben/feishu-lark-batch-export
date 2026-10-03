@@ -5,9 +5,9 @@
   --slate: #1E3440;
   --paper: #F2EDE4;
   --amber: #E8A33D;
-  --amber-deep: #C97E1E;
+  --amber-deep: #A9640F;
   --text: #46545C;
-  --dim: #8C979D;
+  --dim: #5E6A72;
   --line: rgba(16, 28, 34, .13);
   --mono: "Sarasa Fixed SC Nerd Font", "Sarasa Mono SC", ui-monospace, Consolas, Menlo, monospace;
   --sans: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
@@ -35,7 +35,8 @@
 
 #fbe-panel {
   position: fixed; right: 20px; bottom: 20px; z-index: 2147483000;
-  width: 428px; max-height: 82vh; display: flex; flex-direction: column;
+  /* 窄视口（分屏 1/4、手机浏览器）下面板左缘不该被 right:20 顶出屏幕外 */
+  width: min(428px, calc(100vw - 24px)); max-height: 82vh; display: flex; flex-direction: column;
   background: var(--paper); color: var(--text);
   border-radius: 10px; overflow: hidden;
   font: 13px/1.6 var(--sans);
@@ -133,27 +134,40 @@
   font: 12px/1.4 var(--sans); cursor: pointer;
 }
 .fbe-btn:hover:not(:disabled) { background: #fff; border-color: rgba(16, 28, 34, .22) }
+/* 按下要有交代 —— 复制钮早就有这 1px，主键不该反而没有 */
+.fbe-btn:active:not(:disabled) { transform: translateY(1px) }
 .fbe-btn:disabled { opacity: .45; cursor: default }
 
-/* 唯一的重色控件：整条流程只有这一个「现在开始」 */
+/* 唯一的重色控件：整条流程只有这一个「现在开始」。
+   底色必须压到白字 ≥4.5:1（#A9640F=4.65），它是全板最小的大字主键，没有豁免可言。 */
 .fbe-btn--go {
   flex: 1; padding: 10px 16px; border: 0; border-radius: 6px;
   background: var(--amber-deep); color: #fff;
   font: 600 13px/1.4 var(--sans); letter-spacing: .02em;
 }
-.fbe-btn--go:hover:not(:disabled) { background: #B36F16 }
-/* 没东西可导时它不该是屏幕上最重的一块 —— 退成描边，别抢注意力 */
+.fbe-btn--go:hover:not(:disabled) { background: #935609 }
+/* 没东西可导时它不该是屏幕上最重的一块 —— 退成描边，别抢注意力。
+   描边用 outline 不用 box-shadow：高对比模式下系统会剥掉阴影，描边则被重绘保留。 */
 .fbe-btn--go:disabled {
   background: transparent; color: var(--dim); opacity: 1;
-  box-shadow: inset 0 0 0 1px var(--line);
+  outline: 1px solid var(--line); outline-offset: -1px;
 }
+
+/* 运行中主行只剩一个动作：start 由 JS 隐藏，「停止」接管整行。
+   它是刹车不是第二个油门 —— 加宽但不给重色，用红字+红描边表意。 */
+#fbe-stop {
+  flex: 1; padding: 10px 16px; font-weight: 600;
+  color: #9E2A1F; border-color: rgba(158, 42, 31, .45);
+}
+#fbe-stop:hover:not(:disabled) { background: #FBF3F1; border-color: rgba(158, 42, 31, .65) }
 
 .fbe-check { display: flex; align-items: center; gap: 5px; cursor: pointer;
   font: 12px/1 var(--sans); color: var(--text) }
 
 /* ── 装箱单：这个面板的主角 ── */
-/* 88px ≈ 三行。再矮就不像个列表了；但也不能更高，否则小屏上中段挤不下 */
-#fbe-tree { overflow: auto; min-height: 88px; padding: 5px 0 }
+/* 88px ≈ 三行。再矮就不像个列表了；但也不能更高，否则小屏上中段挤不下。
+   scrollbar-gutter 留槽：滚动条出现的那一瞬间，右对齐的类型列不该整体跳 15px。 */
+#fbe-tree { overflow: auto; min-height: 88px; padding: 5px 0; scrollbar-gutter: stable }
 #fbe-tree > div {
   display: flex; align-items: center; gap: 8px;
   padding: 3px 14px; white-space: nowrap;
@@ -168,7 +182,9 @@
   flex: none; font: 11px/1.6 var(--mono); font-style: normal;
   color: var(--dim); letter-spacing: .04em;
 }
-#fbe-tree input[type=checkbox] { flex: none; accent-color: var(--amber-deep); margin: 0 }
+/* 勾选框的琥珀要一视同仁：只给树里定色的话，计数行的「全选」会露出系统蓝 */
+#fbe-panel input[type=checkbox] { accent-color: var(--amber-deep) }
+#fbe-tree input[type=checkbox] { flex: none; margin: 0 }
 /* 导不出来的类型：勾不上，也别让它看起来像能勾 */
 .fbe-dead { opacity: .42 }
 .fbe-dead .fbe-name { cursor: default }
@@ -178,6 +194,10 @@
   display: flex; align-items: center; justify-content: center; text-align: center;
   padding: 20px 34px; color: var(--dim); font-size: 12.5px;
 }
+/* 扫描要跑几分钟（大知识库），静帧的「正在列出…」和卡死无法区分。
+   busy 类由 JS 在列出中挂上，整句缓慢呼吸 —— 一次导出要盯十分钟，值得知道它还活着。 */
+#fbe-empty.busy { animation: fbe-breathe 1.5s ease-in-out infinite }
+@keyframes fbe-breathe { 0%, 100% { opacity: 1 } 50% { opacity: .45 } }
 
 /* ── 更多设置：默认收起。默认值本来就该是对的，多数人不用打开 ── */
 #fbe-more { border-bottom: 1px solid var(--line) }
@@ -247,8 +267,11 @@
 #fbe-log {
   margin: 0; padding: 3px 14px 11px; min-height: 44px; max-height: 132px; overflow: auto;
   font: 11.5px/1.85 var(--mono); color: var(--text);
-  white-space: pre-wrap; word-break: break-all;
+  white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere;
 }
+/* 失败行值得一眼扫到：✗ 行上深锈红（6.4:1，与琥珀同暖调），− 跳过行保持灰 —— 
+   只有「坏了」才是需要颜色说话的状态。 */
+#fbe-log .fbe-fail { color: #9E2A1F }
 /* 按钮浮在右上角：悬停或失败常驻时给第一行让出顶部，别让按钮压在文字上 */
 #fbe-log-wrap:hover #fbe-log,
 #fbe-log-wrap.fbe-log-tools-on #fbe-log { padding-top: 22px }
@@ -259,4 +282,5 @@
 }
 @media (prefers-reduced-motion: reduce) {
   #fbe-progress-fill { transition: none }
+  #fbe-empty.busy { animation: none }
 }

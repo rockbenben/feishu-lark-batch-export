@@ -860,6 +860,39 @@ test('i18n: 商店字段不能超 Chrome 的长度上限', () => {
   }
 });
 
+// ── 颜色对比度 ──
+// 主按钮和次级文字都实测过低于 4.5:1 的地板（白字压琥珀 3.24、--dim 压纸底 2.56）。
+// 这个证人钉住 token 配对：谁再把这几个色改浅，先在这里红，而不是在用户屏幕上才发现。
+const cssText = readFileSync(new URL('./extension/panel.css', import.meta.url), 'utf8');
+const cssToken = (name) => {
+  const m = cssText.match(new RegExp(`--${name}: (#[0-9A-Fa-f]{6})`));
+  assert.ok(m, `panel.css 里找不到 token --${name}`);
+  return m[1];
+};
+const relLum = (hex) => {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrastRatio = (a, b) => {
+  const [x, y] = [relLum(a), relLum(b)].sort((m, n) => n - m);
+  return (x + 0.05) / (y + 0.05);
+};
+
+test('contrast: 面板正文色对不低于 WCAG AA 的 4.5:1', () => {
+  const pairs = [
+    ['主按钮白字 / 琥珀底', '#ffffff', cssToken('amber-deep')],
+    ['正文 / 纸底', cssToken('text'), cssToken('paper')],
+    ['次级文字 / 纸底', cssToken('dim'), cssToken('paper')],
+    ['页眉纸色字 / 墨底', cssToken('paper'), cssToken('ink')],
+    ['失败行锈红 / 纸底', '#9E2A1F', cssToken('paper')],
+  ];
+  for (const [name, fg, bg] of pairs) {
+    const r = contrastRatio(fg, bg);
+    assert.ok(r >= 4.5, `${name} 对比度只有 ${r.toFixed(2)}，低于 4.5`);
+  }
+});
+
 test('i18n: 界面上不该再有写死的中文', () => {
   // 语言选择器里的语言名按惯例用该语言自己的写法，不翻译 —— 看不懂当前界面语言的人
   // 正是要靠这个找到自己的语言。

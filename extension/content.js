@@ -972,8 +972,13 @@
     const el = $('fbe-log');
     const wrap = $('fbe-log-wrap');
     wrap.hidden = false; // 没话说的时候不占地方
-    el.textContent += (el.textContent ? '\n' : '') + msg;
+    // 一行一个 span：✗ 行要有自己的颜色，整块 textContent 拼接做不到。
+    // 复制读的是 textContent，span 不改变复制结果。
+    const line = document.createElement('span');
+    line.textContent = (el.textContent ? '\n' : '') + msg;
+    if (msg.trimStart().startsWith('✗')) line.classList.add('fbe-fail');
     if (LOG_TOOLS_ON_RE.test(msg)) wrap.classList.add('fbe-log-tools-on');
+    el.append(line);
     el.scrollTop = el.scrollHeight;
   }
 
@@ -1001,10 +1006,14 @@
     }
   }
 
+  // 最后一次真实读数：停止收尾时要用。「停在 1/7」和「完成 7/7」是两回事。
+  let lastProgress = { done: 0, total: 0 };
+
   function setProgress(done, total, elapsedMs) {
     const bar = $('fbe-progress');
     if (total <= 0) { bar.hidden = true; return; }
     bar.hidden = false;
+    lastProgress = { done, total };
     const left = etaSeconds(done, elapsedMs, total);
     const eta = left === null ? ''
       : (left < 60 ? t('etaSec', left) : t('etaMin', Math.round(left / 60)));
@@ -1017,8 +1026,13 @@
   }
 
   function refreshCount() {
-    const n = checkboxes().filter((c) => c.checked).length;
+    const boxes = checkboxes();
+    const n = boxes.filter((c) => c.checked).length;
     $('fbe-count').textContent = rows.length ? t('selectedCount', n, rows.length) : '';
+    // 半选这套词汇树行都有，发起全选的框也该有：部分选中时亮横杠，
+    // 点它走浏览器原生语义（先清后勾），而不是「再勾更多」。
+    const live = boxes.filter((c) => !c.disabled).length;
+    $('fbe-all').indeterminate = n > 0 && n < live;
     $('fbe-start').disabled = running || n === 0;
     // 主按钮跟着当前这一步走：还没列出东西时，该点的是「列出文档」；
     // 列出来了，重心才移到「开始导出」。任何时刻只有一个显眼的下一步。
@@ -1028,11 +1042,18 @@
     $('fbe-since').disabled = rows.length === 0;
   }
 
-  // 列表为空时，让位给一句「接下来做什么」，而不是留一片空白
-  function showEmpty(text) {
+  // 列表为空时，让位给一句「接下来做什么」，而不是留一片空白。
+  // busy：扫描中的提示要呼吸（大知识库要跑几分钟，静帧和卡死无法区分）。
+  function showEmpty(text, busy) {
     $('fbe-tree').hidden = !!text;
     $('fbe-empty').hidden = !text;
+    $('fbe-empty').classList.toggle('busy', !!busy);
     if (text) $('fbe-empty').textContent = text;
+  }
+
+  // 空态开场白跟着当前来源走：URL 模式的下一步是「选好 TXT」，不是「选好来源」
+  function emptyInviteText() {
+    return $('fbe-src').value === 'urls' ? t('emptyInviteUrls') : t('emptyInvite');
   }
 
   // 过滤只管显示，不碰勾选状态 —— 行是 CSS 隐藏的，checkbox 还在 DOM 里，
@@ -1042,7 +1063,7 @@
     const lines = Array.from($('fbe-tree').children);
     if (!q) {
       lines.forEach((l) => { l.hidden = false; });
-      showEmpty(rows.length ? '' : t('emptyInvite'));
+      showEmpty(rows.length ? '' : emptyInviteText());
       return;
     }
 
@@ -1084,7 +1105,8 @@
       // 导不出来的类型（思维笔记）直接不给勾 —— 让人选中一个注定被跳过的东西，
       // 是把失败推迟到导出之后才告诉他。pickFormat 返回 null 只跟类型有关，
       // 跟当前选的格式无关，所以这里就能定。
-      if (!pickFormat(row.node.obj_type, 'auto')) {
+      const exportable = !!pickFormat(row.node.obj_type, 'auto');
+      if (!exportable) {
         cb.disabled = true;
         line.classList.add('fbe-dead');
         line.title = t('notExportable', typeName(row.node.obj_type));
@@ -1093,6 +1115,8 @@
       const label = document.createElement('label');
       label.className = 'fbe-name';
       label.textContent = row.node.title || t('untitled');
+      // 截断的长标题要有全名可看；dead 行整行已挂「为什么导不出」，不抢它
+      if (exportable) label.title = row.node.title || t('untitled');
       const tag = document.createElement('em');
       tag.className = 'fbe-kind';
       tag.textContent = row.node.has_child && !TYPES[row.node.obj_type]
@@ -1111,7 +1135,12 @@
         refreshCount();
       };
       cb.onclick = (e) => toggle(!e.altKey);
-      label.onclick = (e) => { cb.checked = !cb.checked; toggle(!e.altKey); };
+      // 程序化赋值绕得过 disabled —— 不挡住 label 点击，「导不出不给勾」就只是画给人看的
+      label.onclick = (e) => {
+        if (cb.disabled) return;
+        cb.checked = !cb.checked;
+        toggle(!e.altKey);
+      };
       line.append(cb, label, tag);
       tree.appendChild(line);
     });
@@ -1132,6 +1161,9 @@
     refreshMarks();
     refreshCount();
     log(t('selectedRecent', days, hit));
+    // 这是个动作，不是过滤器：动作完成后控件弹回菜单位，
+    // 停留在「7 天内」会让人以为还能切回去，而且同值再也触发不了。
+    $('fbe-since').value = '0';
   }
 
   // ── 设置持久化 ──
@@ -1168,13 +1200,9 @@
 
   async function scanWiki(onFolder, onSkip) {
     const token = wikiTokenFromPath(location.pathname);
-    if (!token) {
-      // 在 /wiki/ 下却取不到 token ⇒ 停在知识库首页或功能页，不是某一篇文档。
-      // 这两种情况该做的下一步不同，别混成一句话。
-      if (/\/wiki\//.test(location.pathname)) throw new Error(t('errWikiNotDoc'));
-      const right = sourceForPath(location.pathname) === 'folder' ? t('srcFolder') : t('srcDrive');
-      throw new Error(t('errNotWiki', right));
-    }
+    // scan() 已把不匹配当前页面的来源自动切走，所以走到这里必然在 /wiki/ 下；
+    // 取不到 token 的只剩一种：知识库首页/功能页。
+    if (!token) throw new Error(t('errWikiNotDoc'));
 
     const { spaceId, rootToken, rootNode } = await findSpaceRoot(token, getNode);
     const walk = async (node) => {
@@ -1187,7 +1215,7 @@
         children: [],
       };
       if (node.has_child) {
-        onFolder();
+        onFolder(node);
         let kids;
         try {
           kids = await getChildren(spaceId, node.wiki_token);
@@ -1210,7 +1238,7 @@
     const walk = async (node) => {
       const item = { node, children: [] };
       if (node.has_child) {
-        onFolder();
+        onFolder(node);
         let kids;
         try {
           kids = await driveList('children/list/', `&token=${node.wiki_token}`);
@@ -1239,11 +1267,9 @@
   // 压根不在里面，所以没有这个来源就没法导出共享文件夹。
   // 顶层直接用这个文件夹的子项：文件夹本身是导出的起点，不是要导的文档。
   async function scanFolder(onFolder, onSkip) {
+    // 能走到这里说明 sourceForPath 已认出 /drive/folder/<token>（scan 的来源兜底在前），
+    // token 必然存在，不再自备一条永远响不了的报错。
     const token = driveFolderTokenFromPath(location.pathname);
-    if (!token) {
-      const right = sourceForPath(location.pathname) === 'wiki' ? t('srcWiki') : t('srcDrive');
-      throw new Error(t('errNotFolder', right));
-    }
     const walk = driveWalker(onFolder, onSkip);
     const items = [];
     for (const n of await driveList('children/list/', `&token=${token}`)) {
@@ -1258,10 +1284,19 @@
     $('fbe-log').textContent = '';
     $('fbe-log-wrap').hidden = true;
     $('fbe-log-wrap').classList.remove('fbe-log-tools-on');
-    showEmpty(t('listing'));
+    showEmpty(t('listing'), true);
     try {
       let folders = 0;
-      const onFolder = () => { if (++folders % 10 === 0) showEmpty(t('listExpanded', folders)); };
+      let expanded = 0;
+      // folders 与树上的类型标签同一口径：有子节点、且类型本身导不出来，才显示为「目录」。
+      // 拿 has_child 计数会把「挂了子文档的普通文档」也算进去，两个数对不上会被当成读错了树。
+      // 进度句说的是「干了多久」（展开次数），不是「数出来几个目录」——
+      // 一棵全是带子文档的普通文档的树（知识库常态）目录数恒为 0，报 0 看着像卡住。
+      const onFolder = (node) => {
+        expanded++;
+        if (node && TYPES[node.obj_type] == null) folders++;
+        if (expanded % 10 === 0) showEmpty(t('listExpanded', expanded), true);
+      };
       // 子文件夹打不开只跳过它那棵子树，名字记下来列完报给用户 —— 备份工具最怕
       // 静默缺一块，也不能因为一块没权限就整块都不给。
       const skips = [];
@@ -1284,7 +1319,7 @@
       if (src === 'urls') {
         if (!selectedUrlFile) throw new Error(t('errNoUrlFile'));
         items = await scanUrls(selectedUrlFile, (done, total) => {
-          showEmpty(t('urlChecking', done, total));
+          showEmpty(t('urlChecking', done, total), true);
         });
       } else {
         const scanner = src === 'drive' ? scanDrive : (src === 'folder' ? scanFolder : scanWiki);
@@ -1294,7 +1329,9 @@
       listedFor = src === 'urls' ? 'urls' : location.pathname;
       renderTree();
       if (src === 'urls') log(t('urlListDone', rows.length));
-      else log(t('listDone', rows.length, folders));
+      // 一个目录都没有时不写「其中 0 个目录」—— 零不是信息
+      else if (folders) log(t('listDone', rows.length, folders));
+      else log(t('listDonePlain', rows.length));
       if (skips.length) log(t('listSkipped', skips.length, skips.slice(0, 5).join('; ')));
     } catch (e) {
       rows = [];
@@ -1310,8 +1347,15 @@
 
   function finishRun(items, startedAt) {
     running = false;
-    setProgress(items.length, items.length, Date.now() - startedAt);
+    if (stopped) {
+      // 停止 ≠ 完成：进度停在最后一次真实读数。
+      // 无条件填满会把「1/7 时按的停止」画成「7/7 圆满收工」，和日志里的文件数直接打架。
+      $('fbe-progress-text').textContent = `${lastProgress.done} / ${lastProgress.total} · ${t('stoppedTag')}`;
+    } else {
+      setProgress(items.length, items.length, Date.now() - startedAt);
+    }
     $('fbe-stop').hidden = true;
+    $('fbe-start').hidden = false;
     $('fbe-scan').disabled = false;
     $('fbe-retry').hidden = failed.length === 0;
     $('fbe-retry').textContent = t('btnRetry', failed.length); // 说清楚要重试几篇
@@ -1322,6 +1366,8 @@
     running = true;
     stopped = false;
     failed = [];
+    // 运行中主行只留一个能按的：不可点的幽灵主键不该占住屏幕最重的位置
+    $('fbe-start').hidden = true;
     $('fbe-stop').hidden = false;
     $('fbe-stop').disabled = false;
     $('fbe-retry').hidden = true;
@@ -1486,6 +1532,8 @@
     const urlMode = $('fbe-src').value === 'urls';
     $('fbe-url-row').hidden = !urlMode;
     $('fbe-url-name').textContent = selectedUrlFile ? selectedUrlFile.name : t('urlNoFile');
+    // 还没列出东西时，开场白跟着来源改：URL 模式的下一步是选文件
+    if (!rows.length) showEmpty(emptyInviteText());
   }
 
   function buildPanel() {
@@ -1497,6 +1545,8 @@
     const panel = document.createElement('div');
     panel.id = 'fbe-panel';
     panel.hidden = true;
+    // 焦点要能落进面板本身：容器 tabIndex=-1 不可 Tab 到达，但可被 JS 聚焦
+    panel.tabIndex = -1;
     panel.innerHTML = `
       <header>${t('panelTitle')}
         <span class="fbe-head-right">
@@ -1597,6 +1647,8 @@
 
     // 开合时必须把焦点接过去：fab 一旦 hidden，停在它上面的焦点会掉到 <body>，
     // 键盘用户就得从整个飞书页面顶部重新 Tab 回来。关闭时再还给 fab。
+    // 焦点落在面板容器而不是第一个控件：Esc 的监听挂在面板上，键盘用户照常能关；
+    // 聚焦 select 会被 Chrome 按键盘语义给 :focus-visible，鼠标用户就张顶一圈焦点环。
     const open = () => {
       fab.hidden = true; panel.hidden = false;
       // 站内跳转不重载脚本，打开时重算一次，来源才真的「跟着页面走」
@@ -1609,7 +1661,7 @@
       const concrete = src !== 'urls'
         && (src === 'folder' || (src === 'wiki' && wikiTokenFromPath(location.pathname)));
       if (concrete && !running && listedFor !== location.pathname) scan();
-      $('fbe-src').focus();
+      panel.focus({ preventScroll: true });
     };
     const close = () => {
       panel.hidden = true; fab.hidden = false;
@@ -1645,7 +1697,13 @@
       updateSourceControls();
     };
     $('fbe-all').onchange = (e) => {
-      checkboxes().forEach((c) => { if (!c.disabled) c.checked = e.target.checked; });
+      // 全选只作用于「可见且可勾」的行：被筛选藏起来的行不该被顺手打包。
+      // 直接赋值不走 click —— click 会触发级联，把隐藏的子行也勾上。
+      const boxes = checkboxes();
+      boxes.forEach((c, i) => {
+        if (c.disabled || $('fbe-tree').children[i].hidden) return;
+        c.checked = e.target.checked;
+      });
       refreshMarks();
       refreshCount();
     };
@@ -1661,7 +1719,7 @@
       await loadLocale(e.target.value);
       rebuildPanel();
     };
-    showEmpty(rows.length ? '' : t('emptyInvite'));
+    showEmpty(rows.length ? '' : emptyInviteText());
     refreshCount();
   }
 
