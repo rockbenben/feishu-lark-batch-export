@@ -1,6 +1,6 @@
 name: CI
 
-# 平时推 main 只跑测试；打个 v1.0.0 这样的 tag 才额外打包并建 Release。
+# 平时推 main 只跑测试（纯函数层 + UI 层）；打个 v1.0.0 这样的 tag 才额外打包并建 Release。
 # 测试得在 tag 之前就有机会红 —— 只在发布时跑的闸门，红的时候 tag 已经推出去了。
 # 不给 workflow_dispatch：手点时 GITHUB_REF_NAME 是分支名，
 # 下面的版本校验拿它去比 manifest 必然不一致，等于挂一个注定失败的入口。
@@ -24,8 +24,21 @@ jobs:
           node-version: "22"
 
       # 测试是发布的闸门：没构建步骤，但逻辑和两份语言文件都有守卫
-      - name: test
+      - name: 单元测试（纯函数层）
         run: node --test test.mjs
+
+      # ── UI 层：test.mjs 在 content.js 的 `typeof document` 守卫处就返回了，
+      # 面板勾选/级联/过滤/重扫/切语言这些行为全在覆盖之外 —— 不补这一层，
+      # 改 UI 之后 CI 全绿也证明不了任何事。真实 Chrome + 真实鼠标事件。
+      - name: 准备 Chrome
+        run: |
+          if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq chromium-browser
+          fi
+          (command -v google-chrome || command -v chromium || command -v chromium-browser) --version
+
+      - name: UI 回归检查（真实 Chrome）
+        run: node test/ui/check-ui.mjs
 
       # tag 和 manifest 版本对不上是最容易犯又最难发现的错 —— 商店里显示的是
       # manifest 那个，Release 页显示的是 tag，不一致就没人说得清装的是哪版

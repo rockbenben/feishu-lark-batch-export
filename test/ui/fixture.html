@@ -1,0 +1,332 @@
+<!doctype html>
+<!-- 宿主页夹具：模拟一个飞书文档页，喂假 XHR 数据让真实 content.js 渲染出各状态。
+     URL 参数：?st=<状态>&lang=<zh_CN|en>&slow=<1>
+     状态：fab empty listed listed-more filter recent urls urls-file running done stopped listing err-notdoc folder-listed drive-home -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Feishu doc page fixture</title>
+<link rel="stylesheet" href="/extension/panel.css">
+<style>
+  /* 假宿主页：中性灰底 + 文档骨架，右下角放两个「飞书自带」悬浮件用于位置取证 */
+  html, body { margin: 0; height: 100%; background: #f5f6f7; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .fake-doc { max-width: 760px; margin: 0 auto; padding: 64px 48px; }
+  .fake-doc .t { height: 28px; width: 55%; background: #d8dade; border-radius: 4px; margin-bottom: 28px; }
+  .fake-doc .l { height: 12px; background: #e3e5e8; border-radius: 3px; margin: 14px 0; }
+  .fake-doc .l.w90 { width: 90%; } .fake-doc .l.w97 { width: 97%; } .fake-doc .l.w75 { width: 75%; } .fake-doc .l.w60 { width: 60%; }
+  .host-widget { position: fixed; z-index: 2147482000; display: flex; align-items: center; justify-content: center;
+    background: #fff; border: 1px solid #dee0e3; border-radius: 8px; color: #646a73; font-size: 13px; box-shadow: 0 2px 8px rgba(31,35,41,.08); }
+  .host-help { right: 20px; bottom: 96px; width: 80px; height: 33px; }   /* 表格页帮助按钮：实测占底部 96–129px */
+  .host-feedback { right: 20px; bottom: 20px; width: 34px; height: 34px; border-radius: 50%; }
+</style>
+</head>
+<body>
+  <div class="fake-doc">
+    <div class="t"></div>
+    <div class="l w97"></div><div class="l w90"></div><div class="l"></div>
+    <div class="l w97"></div><div class="l w75"></div><div class="l w90"></div><div class="l w60"></div>
+  </div>
+  <div class="host-widget host-help">帮 助</div>
+  <div class="host-widget host-feedback">？</div>
+
+<script>
+'use strict';
+// ───────────────────────── 夹具本体（先于 content.js 装好桩） ─────────────────────────
+const QS = new URLSearchParams(location.search);
+const ST = QS.get('st') || 'fab';
+const LANG = QS.get('lang') === 'en' ? 'en' : 'zh_CN';
+const SLOW = QS.get('slow') === '1';
+const FROZEN = QS.get('freeze') === '1'; // 第 3 个导出请求永不返回：把面板钉死在运行中
+const BIG = QS.get('big') === '1';       // 14 个 docx 容器大树：测「已展开 N 个目录」进度句
+const FAILALL = QS.get('failall') === '1'; // 全部导出失败：测错误日志压力
+let createHits = 0;
+let childHits = 0;
+if (!QS.get('keepsettings')) localStorage.clear(); // 每次载入都当全新安装，避免状态串台
+
+const DAY = 86400;
+const editAgo = (d) => Math.floor(Date.now() / 1000) - d * DAY;
+
+// wiki 节点：F1/E1 是 type 4「目录」（不可勾）；FF 是挂子节点的 docx 容器（可勾、级联）
+function wn(token, objType, title, hasChild, daysAgo) {
+  return {
+    wiki_token: `wik${token}`, obj_token: `obj${token}`, obj_type: objType,
+    title, has_child: !!hasChild, space_id: 'sp1',
+    parent_wiki_token: token === 'T0' ? 'VROOT' : 'IGNORED',
+    detail_info: { edit_time: editAgo(daysAgo) },
+  };
+}
+const WIKI_NODE = {
+  // URL 里的当前文档 token（TESTTOKEN）：能取到节点，父级是虚拟根
+  TESTTOKEN: wn('T0', 22, '登录页改版方案 v2', false, 2),
+  VROOT: null, // get_node 报错 → soft 探测认定虚拟根
+  F1: wn('F1', 4, '产品与设计', true, 4),
+  D1: wn('D1', 22, '登录页改版方案 v2', false, 2),
+  D2: wn('D2', 2, '旧版登录说明（停用）', false, 45),
+  FF: wn('FF', 22, '增长实验', true, 5),
+  B1: wn('B1', 8, '需求池', false, 6),
+  A1: wn('A1', 12, '原型.fig', false, 1),
+  L1: wn('L1', 22, '2026 年第二季度消费者业务线增长策略与渠道复盘（终版·评审记录·含附录与原始数据索引）', false, 3),
+  D3: wn('D3', 22, '会议纪要归档', false, 3),
+  M1: wn('M1', 11, '架构脑图', false, 20),
+  W1: wn('W1', 99, '白板画布', false, 60),
+  E1: wn('E1', 4, '临时目录（先占位）', true, 10),
+};
+const WIKI_CHILDREN = {
+  VROOT: [WIKI_NODE.F1, WIKI_NODE.D3, WIKI_NODE.M1, WIKI_NODE.W1, WIKI_NODE.E1],
+  wikF1: [WIKI_NODE.D1, WIKI_NODE.D2, WIKI_NODE.FF, WIKI_NODE.L1],
+  wikFF: [WIKI_NODE.B1, WIKI_NODE.A1],
+  wikE1: [],
+};
+// 大树：14 个「挂了子文档的普通文档」（type 22 容器）——树上没有一行叫「目录」
+if (BIG) {
+  const tops = [];
+  for (let i = 1; i <= 14; i++) {
+    const parent = wn(`BIG${i}`, 22, `季度复盘归档 ${i}`, true, 3);
+    const kid = wn(`BIGK${i}`, 22, `子文档 ${i}`, false, 3);
+    WIKI_CHILDREN[`wikBIG${i}`] = [kid];
+    tops.push(parent);
+  }
+  WIKI_CHILDREN.VROOT = tops;
+}
+
+// 云空间节点（字段是 name/type/token），drive home + folder F1X 共用
+function dn(token, type, name, daysAgo) {
+  return { token, name, type, edit_time: String(editAgo(daysAgo)) };
+}
+const DRIVE = {
+  'my_space/folder/': ['df1'],
+  'my_space/obj/': ['do1'],
+  'children/list/': { df1: ['dc1', 'dc2', 'dc3'], F1X: ['dc1', 'dc2', 'dc3'] },
+};
+const DRIVE_ENT = {
+  df1: dn('df1', 4, '我的文档', 4), do1: dn('do1', 22, '随笔', 12),
+  dc1: dn('dc1', 22, '季度计划', 2), dc2: dn('dc2', 3, '预算表', 30), dc3: dn('dc3', 12, '录屏.mp4', 1),
+};
+
+const MD_WITH_IMAGES = '# 登录页改版方案 v2\n\n正文……\n\n![流程图](https://internal-api-drive-stream.feishu.cn/img/g1.png)\n\n![对比图](https://internal-api-drive-stream.feishu.cn/img/g2.png)\n';
+const MD_WITH_BAD_IMAGE = '# 旧版登录说明\n\n![截图](https://internal-api-drive-stream.feishu.cn/img/bad.png)\n';
+const MD_PLAIN = '# 增长实验\n\n略。\n';
+// 1x1 透明 PNG
+const PNG_BYTES = Uint8Array.from(atob(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+), (c) => c.charCodeAt(0));
+
+const exportCounters = {};
+function exportResultFor(ticket) {
+  const [key, ext] = ticket.split('|');
+  return { job_status: 0, file_token: `ft-${key}`, file_extension: ext, file_name: '' };
+}
+function mdFor(fileToken) {
+  const objToken = fileToken.replace(/^ft-/, '');
+  if (objToken === 'objD1') return MD_WITH_IMAGES;
+  if (objToken === 'objFF' || objToken === 'objL1') return MD_PLAIN;
+  return MD_WITH_BAD_IMAGE; // objD2
+}
+
+class FakeXHR {
+  constructor() {
+    this.status = 200; this.responseText = ''; this.response = null;
+    this.readyState = 1; this.timeout = 0; this.withCredentials = false; this.responseType = '';
+    this._headers = {}; this._respHeaders = {};
+  }
+  open(method, url) { this._method = method; this._url = url; }
+  setRequestHeader(k, v) { this._headers[k.toLowerCase()] = v; }
+  getResponseHeader(k) { return this._respHeaders[String(k).toLowerCase()] ?? null; }
+  abort() { setTimeout(() => this.onabort && this.onabort(), 0); }
+  send(body) {
+    const delay = SLOW ? 700 : 120;
+    setTimeout(() => this._route(body), delay + Math.random() * 80);
+  }
+  _json(obj) { this.status = 200; this.responseText = JSON.stringify(obj); this.response = this.responseText; this.onload && this.onload(); }
+  _blob(blob, status) {
+    this.status = status;
+    this.responseType === 'blob' ? (this.response = blob) : (this.responseText = '');
+    if (status === 200) this.onload && this.onload(); else this.onload && this.onload();
+  }
+  _route(body) {
+    let u; try { u = new URL(this._url, location.href); } catch { return this._json({ code: -1, msg: 'bad url' }); }
+    const p = u.pathname;
+    // 图床
+    if (/internal-api-drive-stream/.test(u.hostname)) {
+      if (p.includes('/img/bad')) { this.status = 403; this.responseText = ''; return this.onload && this.onload(); }
+      return this._blob(new Blob([PNG_BYTES], { type: 'image/png' }), 200);
+    }
+    if (p.endsWith('/wiki/v2/tree/get_node/')) {
+      const token = u.searchParams.get('wiki_token');
+      const node = WIKI_NODE[token];
+      return this._json(node ? { code: 0, msg: 'success', data: node }
+        : { code: 2, msg: `wiki node ${token} not found` });
+    }
+    if (p.endsWith('/wiki/v2/tree/get_node_child/')) {
+      childHits++;
+      // listing 冻结：小树一开始就挂；大树读到第 11 次（已展开 10 个）才挂，让进度句先亮出来
+      if (FROZEN && ST === 'listing' && (!BIG || childHits >= 11)) return;
+      const token = u.searchParams.get('wiki_token');
+      const kids = WIKI_CHILDREN[token] ?? [];
+      return this._json({ code: 0, msg: 'success', data: { [token]: kids } });
+    }
+    if (p.includes('/explorer/v3/')) {
+      const seg = p.includes('/children/list/') ? 'children/list/'
+        : p.includes('/my_space/folder/') ? 'my_space/folder/' : 'my_space/obj/';
+      let list;
+      if (seg === 'children/list/') {
+        const token = u.searchParams.get('token');
+        list = DRIVE['children/list/'][token] ?? [];
+      } else list = DRIVE[seg];
+      const entities = {}; for (const t of list) entities[t] = DRIVE_ENT[t];
+      return this._json({ code: 0, msg: 'success', data: { has_more: false, node_list: list, entities: { nodes: entities } } });
+    }
+    if (p.endsWith('/export/create/')) {
+      createHits++;
+      if (FROZEN && createHits >= 3) return; // 永不响应，停在运行中
+      const b = JSON.parse(body || '{}');
+      if (FAILALL) return this._json({ code: 191001, msg: `permission denied on export task for ${b.token}` });
+      if (ST === 'stopped' && createHits === 2) {
+        // 网络事件驱动点停：定时器在多 iframe 负载下会漂，事件不会
+        setTimeout(() => { const s = document.getElementById('fbe-stop'); if (s && !s.hidden) s.click(); }, 0);
+      }
+      if (b.token === 'objD3') return this._json({ code: 191001, msg: 'permission denied on export task' });
+      exportCounters[b.token] = (exportCounters[b.token] || 0) + 1;
+      return this._json({ code: 0, msg: 'success', data: { ticket: `${b.token}|${b.file_extension}|${exportCounters[b.token]}` } });
+    }
+    const m = p.match(/\/export\/result\/([^/?]+)/);
+    if (m) {
+      const [key, ext] = decodeURIComponent(m[1]).split('|');
+      const r = exportResultFor(`${key}|${ext}`);
+      return this._json({ code: 0, msg: 'success', data: { result: r } });
+    }
+    if (p.includes('/box/stream/download/all/')) {
+      const t = u.pathname.split('/').pop();
+      if (t.startsWith('ft-objD')) return this._blob(new Blob([mdFor(t)], { type: 'text/markdown' }), 200);
+      return this._blob(new Blob(['fake-binary-payload'], { type: 'application/octet-stream' }), 200);
+    }
+    return this._json({ code: -1, msg: `fixture has no route for ${p}` });
+  }
+  _fail(status) { this.status = status; this.onerror && this.onerror(); }
+}
+window.XMLHttpRequest = FakeXHR;
+
+// chrome.i18n / runtime 桩：双语都预载，t() 走 i18n，手动切语言走 sendMessage(fbe-locale)
+const MSGS = {};
+async function stubChrome() {
+  for (const l of ['zh_CN', 'en']) {
+    MSGS[l] = await (await fetch(`/extension/_locales/${l}/messages.json`)).json();
+  }
+  window.chrome = {
+    i18n: {
+      getMessage(key, subs) {
+        const m = MSGS[LANG]?.[key]?.message;
+        if (m == null) return '';
+        return String(m).replace(/\$(\d)/g, (_, n) => String((subs || [])[n - 1] ?? ''));
+      },
+    },
+    runtime: {
+      sendMessage(msg, cb) {
+        let res = null;
+        if (msg?.type === 'fbe-locale') res = MSGS[msg.lang] ?? null;
+        setTimeout(() => cb && cb(res), 20);
+      },
+      onMessage: { addListener(fn) { window.__panelToggle = (v) => fn(v || { type: 'fbe-toggle' }); } },
+    },
+  };
+}
+
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(fn, timeout = 40000, label = 'condition') {
+  const t0 = Date.now();
+  for (;;) {
+    if (fn()) return true;
+    if (Date.now() - t0 > timeout) throw new Error(`harness timeout: ${label}`);
+    await sleep(60);
+  }
+}
+function openPanel() {
+  // 合成 PointerEvent 会撞 setPointerCapture（非活动指针直接抛），走工具栏消息开合
+  window.__panelToggle();
+}
+function setSelect(el, value) { el.value = value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+const listed = () => $('fbe-tree').children.length > 0;
+const logText = () => $('fbe-log').textContent;
+
+async function drive() {
+  if (ST === 'fab') return;
+  openPanel();
+  if (ST === 'empty' || ST === 'urls' || ST === 'urls-file') {
+    await waitFor(() => !$('fbe-panel').hidden, 5000, 'panel open');
+  }
+  if (ST === 'urls' || ST === 'urls-file') setSelect($('fbe-src'), 'urls');
+  if (ST === 'urls-file') {
+    const dt = new DataTransfer();
+    dt.items.add(new File(['https://fixture.feishu.cn/docx/AAA\n'], '文档清单 2026-Q2（终版） (1).txt', { type: 'text/plain' }));
+    $('fbe-url-file').files = dt.files;
+    $('fbe-url-file').dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (ST === 'listing') {
+    // 大树（big=1）等「已展开 N」亮出来；小树停在开场静帧即可
+    const re = BIG ? /已展开|Expanded/ : /列出|展开|Listing|Expanded/;
+    await waitFor(() => re.test($('fbe-empty').textContent), BIG ? 60000 : 8000, 'listing text');
+    return;
+  }
+  if (ST === 'err-notdoc') {
+    $('fbe-scan').click();
+    await waitFor(() => /token|文档/.test(logText()) || $('fbe-empty').textContent.length > 0, 8000, 'err text');
+    await waitFor(() => !$('fbe-scan').disabled, 8000, 'scan re-enabled');
+    return;
+  }
+  if (ST === 'empty' || ST === 'urls' || ST === 'urls-file') return;
+
+  await waitFor(listed, 30000, 'tree rendered');
+  if (ST === 'listed' || ST === 'folder-listed') return;
+  if (ST === 'main') {
+    // 资产图构图：勾几篇 + 级联出半选，思维笔记 dead 行在列
+    const want = ['登录页改版方案 v2', '旧版登录说明（停用）', '增长实验', '会议纪要归档'];
+    for (const lb of $('fbe-tree').querySelectorAll('.fbe-name')) {
+      if (want.includes(lb.textContent)) lb.click();
+    }
+    return;
+  }
+  if (ST === 'listed-more') { $('fbe-more').open = true; return; }
+  if (ST === 'filter') {
+    $('fbe-q').value = '登录'; $('fbe-q').dispatchEvent(new Event('input', { bubbles: true }));
+    return;
+  }
+  if (ST === 'recent') {
+    setSelect($('fbe-since'), '7');
+    await waitFor(() => /天内改过的|last 7 days|Edited in/.test(logText()), 5000, 'recent log');
+    return;
+  }
+  $('fbe-all').click();
+  if (ST === 'running') {
+    $('fbe-start').click();
+    if (FROZEN) { await waitFor(() => /^1 \/ /.test($('fbe-progress-text').textContent), 30000, '1 item done'); return; }
+    await waitFor(() => /^2 \/ /.test($('fbe-progress-text').textContent), 30000, '2 items done');
+    return;
+  }
+  if (ST === 'stopped') {
+    $('fbe-start').click();
+    // 停止由 FakeXHR 在第 2 个导出请求时触发；等 finishRun 收尾即可
+    await waitFor(() => $('fbe-stop').hidden, 60000, 'stop settle');
+    return;
+  }
+  if (ST === 'done') {
+    $('fbe-start').click();
+    await waitFor(() => !$('fbe-retry').hidden, 90000, 'run finished');
+  }
+}
+
+// 先清一次性失败计数，避免 iframe 重载后 ticket 计数干扰
+(async () => {
+  await stubChrome();
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = '/extension/content.js';
+    s.onload = resolve; s.onerror = reject;
+    document.head.append(s);
+  });
+  await waitFor(() => $('fbe-fab') || $('fbe-panel'), 8000, 'content boot');
+  await drive().then(() => { window.__ready = true; }, (e) => { window.__ready = 'ERR:' + e.message; console.error(e); });
+})();
+</script>
+</body>
+</html>
