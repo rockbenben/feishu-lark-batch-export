@@ -166,8 +166,14 @@
 
 /* ── 装箱单：这个面板的主角 ── */
 /* 88px ≈ 三行。再矮就不像个列表了；但也不能更高，否则小屏上中段挤不下。
-   scrollbar-gutter 留槽：滚动条出现的那一瞬间，右对齐的类型列不该整体跳 15px。 */
-#fbe-tree { overflow: auto; min-height: 88px; padding: 5px 0; scrollbar-gutter: stable }
+   scrollbar-gutter 留槽：滚动条出现的那一瞬间，右对齐的类型列不该整体跳 15px。
+   渐隐只盖住末行最下面那一小截（行高 26px，渐隐 15px < 半行），
+   所以读起来是「这一行还没完，下面有」，而不是被拦腰切断。 */
+#fbe-tree {
+  overflow: auto; min-height: 88px; padding: 5px 0; scrollbar-gutter: stable;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 15px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 15px), transparent);
+}
 #fbe-tree > div {
   display: flex; align-items: center; gap: 8px;
   padding: 3px 14px; white-space: nowrap;
@@ -283,4 +289,10 @@
 @media (prefers-reduced-motion: reduce) {
   #fbe-progress-fill { transition: none }
   #fbe-empty.busy { animation: none }
+}
+/* 高对比度模式里不要淡化：那个模式存在的意义就是把对比度拉满，
+   渐隐会削掉末行对比度，正好踩在它要解决的问题上。滚动条和硬边在
+   那个模式下本来就够显眼，不需要再补一层「下面还有」的暗示。 */
+@media (forced-colors: active) {
+  #fbe-tree { -webkit-mask-image: none; mask-image: none }
 }
