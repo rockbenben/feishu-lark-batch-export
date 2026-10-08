@@ -12,7 +12,7 @@ new Function('module', src)(mod);
 const {
   pickFormat, sanitizeName, uniqueName, uniqueDir, imageDirName, flatten, findSpaceRoot,
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
-  descendantEnd, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
+  descendantEnd, buildDescendantEnds, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
   withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
   sourceUrlForNode,
   parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
@@ -951,6 +951,68 @@ test('descendantEnd: 后代是紧随其后 depth 更大的连续一段', () => {
   assert.equal(descendantEnd(rows, 2), 3, '叶子没有后代');
   assert.equal(descendantEnd(rows, 3), 4, '子2 是叶子');
   assert.equal(descendantEnd(rows, 4), 5, '最后一项');
+});
+
+test('buildDescendantEnds: 一次算出来的表和逐行现扫的 descendantEnd 完全一致', () => {
+  // 表是 descendantEnd 的替代实现（用来把勾选/过滤里的平方级重扫降成查表），
+  // 所以它必须对每一种树形都给出同样的答案 —— 拿原函数当基准逐项比。
+  const shapes = [
+    [],
+    [0],
+    [0, 0, 0],
+    [0, 1, 2, 1, 0],
+    [0, 1, 2, 3, 4, 3, 2, 1, 0],       // 一条深链
+    [0, 1, 1, 1, 1, 1],                 // 一个根挂五个子
+    [0, 1, 2, 2, 1, 2, 0, 1],           // 深度回退再前进
+    [0, 1, 2, 1, 2, 3, 2, 1, 0, 0],      // 多个根 + 交错深度
+    [0, 0, 1, 2, 1, 0, 1, 0],           // 同层根与子层交替
+    [0, 1, 2, 3, 2, 1, 0, 1, 2, 3, 4],  // 两段深链
+  ];
+  for (const depths of shapes) {
+    const rows = depths.map((depth) => ({ depth }));
+    const ends = buildDescendantEnds(rows);
+    assert.equal(ends.length, rows.length, `表的长度要跟行数一致：${depths}`);
+    for (let i = 0; i < rows.length; i++) {
+      assert.equal(ends[i], descendantEnd(rows, i),
+        `第 ${i} 行（depth=${depths[i]}）的结束下标不一致，树形 ${JSON.stringify(depths)}`);
+    }
+  }
+});
+
+test('buildDescendantEnds: 深层嵌套下比逐行重扫快得多（防平方级回来）', () => {
+  // 只有「祖先多、后代多」的树才看得出差别：星形（一个根 + 一堆平级子项）
+  // 每个叶子扫一步就收工，两种写法都是 O(n)，谁也不比谁快。
+  // 知识库里真正吃亏的是一条长链，descendantEnd 对链上每个节点都要扫到末尾。
+  const n = 4000;
+  const rows = [];
+  for (let i = 0; i < n; i++) rows.push({ depth: i });
+
+  const scanAll = () => {
+    let acc = 0;
+    for (let i = 0; i < rows.length; i++) acc += descendantEnd(rows, i);
+    return acc;
+  };
+  const time = (fn, rounds) => {
+    const t0 = process.hrtime.bigint();
+    for (let k = 0; k < rounds; k++) fn();
+    return Number(process.hrtime.bigint() - t0) / 1e6;
+  };
+
+  const rounds = 3;
+  const scanMs = time(scanAll, rounds);
+  const tableMs = time(() => buildDescendantEnds(rows), rounds);
+
+  // 留足余量：CI 上的机器可能更慢/更忙，卡的是量级而不是某一毫秒的抖动。
+  assert.ok(tableMs * 5 < scanMs,
+    `查表 ${tableMs.toFixed(2)}ms 没有显著快于重扫 ${scanMs.toFixed(2)}ms —— 平方级可能又回来了`);
+});
+
+test('buildDescendantEnds: 生成的表是每次现扫同样的答案（含空树和单行）', () => {
+  assert.deepEqual([...buildDescendantEnds([])], [], '空树得到空表');
+  assert.deepEqual([...buildDescendantEnds([{ depth: 0 }])], [1], '单行的结束下标是末尾');
+  // 叶子自己的结束下标就是它后面第一个不比它深的位置
+  const rows = [{ depth: 3 }, { depth: 1 }];
+  assert.deepEqual([...buildDescendantEnds(rows)], [1, 2]);
 });
 
 test('safeSlug: 干掉会弄断 markdown 链接的字符，中文保留', () => {

@@ -60,6 +60,34 @@
     return j;
   }
 
+  // 单行查找够用，但勾选/过滤都要「对每一行问一次自己的后代到哪结束」，
+  // 每次重扫就是 O(n²)。这里一次栈扫描把每行的结束下标都算出来（O(n)），
+  // 之后每次查询是 O(1)。rows 一变就得重算，所以缓存跟着 rows 的引用走。
+  function buildDescendantEnds(rows) {
+    const ends = new Int32Array(rows.length);
+    const stack = [];
+    for (let i = 0; i < rows.length; i++) {
+      // 深度不再比栈顶大 ⇒ 当前行已经出了栈顶那棵子树，收口。
+      while (stack.length && rows[i].depth <= rows[stack[stack.length - 1]].depth) {
+        ends[stack.pop()] = i;
+      }
+      stack.push(i);
+    }
+    // 栈里剩下的那些到结尾才闭合 —— 它们是最后一条链上的祖先。
+    while (stack.length) ends[stack.pop()] = rows.length;
+    return ends;
+  }
+
+  let endsRows = null;
+  let endsTable = null;
+  function rowEnd(i) {
+    if (endsRows !== rows) {
+      endsRows = rows;
+      endsTable = buildDescendantEnds(rows);
+    }
+    return endsTable[i];
+  }
+
   // 云空间的节点跟知识库节点长得不一样：字段叫 name/type/token 而不是
   // title/obj_type/wiki_token。在这里归一，后面整条流水线就不用管来源了。
   // type 编号跟 wiki 的 obj_type 是同一套，文件夹是 0（子文件夹）或 4（空间根）。
@@ -623,6 +651,7 @@
     module.exports = {
       pickFormat, sanitizeName, uniqueName, uniqueDir, imageDirName, flatten, findSpaceRoot, TYPES,
       crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem, descendantEnd,
+      buildDescendantEnds,
       buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, addTokenToFilename,
       formatSize, readCookie,
       wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
@@ -968,6 +997,12 @@
   // urlInvalidLine 等）。出现这种行时让复制按钮常驻，普通的「列出 N 项」不值得一个按钮。
   const LOG_TOOLS_ON_RE = /[✗−]/;
 
+  // 每次追加之前判断「前面有没有内容」，本来要对整个日志做一次 textContent 读取
+  // —— 那是把已渲染的全部节点重新拼成字符串，一行一次，长批次下是平方级的开销。
+  // 自己记一个「有没有写过」就够：日志只由 log() 追加，两处清空（scan / rebuildPanel）
+  // 负责把标记抹掉。
+  let logHasLines = false;
+
   function log(msg) {
     const el = $('fbe-log');
     const wrap = $('fbe-log-wrap');
@@ -975,7 +1010,8 @@
     // 一行一个 span：✗ 行要有自己的颜色，整块 textContent 拼接做不到。
     // 复制读的是 textContent，span 不改变复制结果。
     const line = document.createElement('span');
-    line.textContent = (el.textContent ? '\n' : '') + msg;
+    line.textContent = (logHasLines ? '\n' : '') + msg;
+    logHasLines = true;
     if (msg.trimStart().startsWith('✗')) line.classList.add('fbe-fail');
     if (LOG_TOOLS_ON_RE.test(msg)) wrap.classList.add('fbe-log-tools-on');
     el.append(line);
@@ -1021,8 +1057,18 @@
     $('fbe-progress-fill').style.width = `${Math.round((done / total) * 100)}%`;
   }
 
+  // 每次勾选都会连着问好几遍（级联、refreshMarks、refreshCount 各一次），
+  // 每次 querySelectorAll 都是一趟全树遍历。行只有 renderTree 会重建，
+  // 所以缓存到重建为止 —— querySelectorAll 的结果在这里是稳定的。
+  // 失效必须由 renderTree 显式触发：靠行数去猜的话，一次行数相同的重新列出
+  // 会把上一批已经脱离文档的旧 checkbox 返回出去，勾了也不会有任何反应。
+  let boxCache = null;
   function checkboxes() {
-    return Array.from($('fbe-tree').querySelectorAll('input[type=checkbox]'));
+    if (!boxCache) boxCache = Array.from($('fbe-tree').querySelectorAll('input[type=checkbox]'));
+    return boxCache;
+  }
+  function invalidateBoxes() {
+    boxCache = null;
   }
 
   function refreshCount() {
@@ -1071,7 +1117,7 @@
     // 命中项的祖先也要留着，否则过滤完只剩一堆没有上下文的孤立标题
     for (let i = rows.length - 1; i >= 0; i--) {
       if (show[i]) continue;
-      for (let j = i + 1, end = descendantEnd(rows, i); j < end; j++) {
+      for (let j = i + 1, end = rowEnd(i); j < end; j++) {
         if (show[j]) { show[i] = true; break; }
       }
     }
@@ -1086,7 +1132,7 @@
     for (let i = 0; i < rows.length; i++) {
       if (boxes[i].checked) { boxes[i].indeterminate = false; continue; }
       let any = false;
-      for (let j = i + 1, end = descendantEnd(rows, i); j < end; j++) {
+      for (let j = i + 1, end = rowEnd(i); j < end; j++) {
         if (boxes[j].checked) { any = true; break; }
       }
       boxes[i].indeterminate = any;
@@ -1095,6 +1141,7 @@
 
   function renderTree() {
     const tree = $('fbe-tree');
+    invalidateBoxes(); // 下面的重建会换掉全部 checkbox
     tree.textContent = '';
     rows.forEach((row, i) => {
       const line = document.createElement('div');
@@ -1127,7 +1174,7 @@
         if (cascade) {
           const boxes = checkboxes();
           // 禁用的（导不出的类型）不能被级联带上 —— 程序化赋值绕得过 disabled
-          for (let j = i + 1, end = descendantEnd(rows, i); j < end; j++) {
+          for (let j = i + 1, end = rowEnd(i); j < end; j++) {
             if (!boxes[j].disabled) boxes[j].checked = cb.checked;
           }
         }
@@ -1282,6 +1329,7 @@
     const button = $('fbe-scan');
     button.disabled = true;
     $('fbe-log').textContent = '';
+    logHasLines = false;
     $('fbe-log-wrap').hidden = true;
     $('fbe-log-wrap').classList.remove('fbe-log-tools-on');
     showEmpty(t('listing'), true);
@@ -1733,11 +1781,15 @@
     const query = $('fbe-q') ? $('fbe-q').value : '';
     const source = $('fbe-src') ? $('fbe-src').value : sourceForPath(location.pathname);
 
+    // 上面读的是旧面板的勾选状态，下面整个面板连同 fbe-tree 都会被换掉 ——
+    // 缓存里那批 checkbox 此时已经脱离文档，不作废的话后面会拿着它们去数新面板。
+    invalidateBoxes();
     if (panel) panel.remove();
     if ($('fbe-fab')) $('fbe-fab').remove();
     buildPanel();
 
     $('fbe-log').textContent = logText;
+    logHasLines = !!logText; // 内容是搬过来的，首行该不该带换行跟着它走
     $('fbe-log-wrap').hidden = !logText;
     $('fbe-log-wrap').classList.toggle('fbe-log-tools-on', LOG_TOOLS_ON_RE.test(logText));
     $('fbe-q').value = query;
