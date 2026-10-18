@@ -35,7 +35,8 @@ jobs:
           if ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
             sudo apt-get update -qq && sudo apt-get install -y -qq chromium-browser
           fi
-          (command -v google-chrome || command -v chromium || command -v chromium-browser) --version
+          CHROME_BIN=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
+          "$CHROME_BIN" --version
 
       - name: UI 回归检查（真实 Chrome）
         run: node test/ui/check-ui.mjs
