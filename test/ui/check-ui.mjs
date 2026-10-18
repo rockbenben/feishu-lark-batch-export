@@ -302,6 +302,17 @@ try {
   await realClick(idxEn);
   check('重建后的 checkbox 可正常响应（缓存没串面板）', (await treeState()).checked >= 1, `点了 #${idxEn}`);
 
+  // 切语言后，通过 chrome.runtime.onMessage 触发 fbe-toggle，面板依然能正常关闭和打开
+  // （守住 buildPanel 重复注册 onMessage 监听器导致的竞争/反跳问题）
+  const listenerCount = await evalJS(`window.chrome.runtime.onMessage._listeners.length`);
+  check('切语言后面板不重复注册 onMessage 监听器', listenerCount === 1, `listeners=${listenerCount}`);
+  await evalJS(`window.__panelToggle({ type: 'fbe-toggle' })`);
+  const toggledClosed = await evalJS(`document.getElementById('fbe-panel').hidden && !document.getElementById('fbe-fab').hidden`);
+  check('切语言后工具栏消息仍可关上面板', toggledClosed, `hidden=${toggledClosed}`);
+  await evalJS(`window.__panelToggle({ type: 'fbe-toggle' })`);
+  const toggledOpen = await evalJS(`!document.getElementById('fbe-panel').hidden && document.getElementById('fbe-fab').hidden`);
+  check('切语言后工具栏消息仍可重新打开面板', toggledOpen, `open=${toggledOpen}`);
+
   // 面板不该横向溢出视口
   const fit = await evalJS(`(() => {
     const p=document.getElementById('fbe-panel').getBoundingClientRect();

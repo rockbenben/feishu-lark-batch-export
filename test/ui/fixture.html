@@ -226,7 +226,13 @@ async function stubChrome() {
         if (msg?.type === 'fbe-locale') res = MSGS[msg.lang] ?? null;
         setTimeout(() => cb && cb(res), 20);
       },
-      onMessage: { addListener(fn) { window.__panelToggle = (v) => fn(v || { type: 'fbe-toggle' }); } },
+      onMessage: {
+        _listeners: [],
+        addListener(fn) {
+          this._listeners.push(fn);
+          window.__panelToggle = (v) => this._listeners.forEach((l) => l(v || { type: 'fbe-toggle' }));
+        },
+      },
     },
   };
 }

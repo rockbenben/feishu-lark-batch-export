@@ -1552,8 +1552,9 @@
     let drag = null;
 
     fab.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return; // 只响应主键（左键或主要触控接触点）
       drag = { x: e.clientX, y: e.clientY, ...pos(), moved: false };
-      fab.setPointerCapture(e.pointerId);
+      try { fab.setPointerCapture(e.pointerId); } catch {}
     });
     fab.addEventListener('pointermove', (e) => {
       if (!drag) return;
@@ -1563,18 +1564,28 @@
       drag.moved = true;
       placeFab(fab, drag.right + dx, drag.bottom + dy);
     });
-    fab.addEventListener('pointerup', (e) => {
-      fab.releasePointerCapture(e.pointerId);
+    const finishDrag = (e, isCancel) => {
+      try { fab.releasePointerCapture(e.pointerId); } catch {}
       const moved = drag && drag.moved;
       drag = null;
-      if (!moved) { onClick(); return; }
+      if (isCancel || !moved) {
+        if (!isCancel) onClick();
+        return;
+      }
       const saved = readSettings();
       saved[FAB_POS_KEY] = pos();
       try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(saved)); } catch (err) { /* 无痕模式等 */ }
-    });
-    // 窗口变小后，存下来的位置可能已经在屏幕外了
-    window.addEventListener('resize', () => placeFab(fab, pos().right, pos().bottom));
+    };
+    fab.addEventListener('pointerup', (e) => finishDrag(e, false));
+    fab.addEventListener('pointercancel', (e) => finishDrag(e, true));
   }
+
+  // 窗口变小后，存下来的位置可能已经在屏幕外了（全局注册一次，避免面板重建反复泄漏）
+  window.addEventListener('resize', () => {
+    const fab = $('fbe-fab');
+    if (!fab) return;
+    placeFab(fab, parseFloat(fab.style.right) || 20, parseFloat(fab.style.bottom) || 150);
+  });
 
   function updateSourceControls() {
     const urlMode = $('fbe-src').value === 'urls';
@@ -1582,6 +1593,48 @@
     $('fbe-url-name').textContent = selectedUrlFile ? selectedUrlFile.name : t('urlNoFile');
     // 还没列出东西时，开场白跟着来源改：URL 模式的下一步是选文件
     if (!rows.length) showEmpty(emptyInviteText());
+  }
+
+  function openPanel() {
+    const fab = $('fbe-fab');
+    const panel = $('fbe-panel');
+    if (!fab || !panel) return;
+    fab.hidden = true;
+    panel.hidden = false;
+    // 站内跳转不重载脚本，打开时重算一次，来源才真的「跟着页面走」
+    const src = $('fbe-src').value === 'urls' ? 'urls' : sourceForPath(location.pathname);
+    $('fbe-src').value = src;
+    updateSourceControls();
+    // 落在知识库文档页或文件夹页这种目标明确的页面上，打开就直接列出文档，省一次点击；
+    // 知识库首页（src=wiki 但 URL 取不到 token）和「我的云空间」意图不明，不自动跑。
+    // 同一页面不重复列，导出进行中也不跑。scan 自带 try/catch，这里不 await。
+    const concrete = src !== 'urls'
+      && (src === 'folder' || (src === 'wiki' && wikiTokenFromPath(location.pathname)));
+    if (concrete && !running && listedFor !== location.pathname) scan();
+    panel.focus({ preventScroll: true });
+  }
+
+  function closePanel() {
+    const fab = $('fbe-fab');
+    const panel = $('fbe-panel');
+    if (!fab || !panel) return;
+    panel.hidden = true;
+    fab.hidden = false;
+    fab.focus();
+  }
+
+  function togglePanel() {
+    const panel = $('fbe-panel');
+    if (!panel) return;
+    if (panel.hidden) openPanel();
+    else closePanel();
+  }
+
+  // 工具栏图标是第二个入口，走 background 转发过来的消息（全局注册一次）
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg && msg.type === 'fbe-toggle') togglePanel();
+    });
   }
 
   function buildPanel() {
@@ -1693,43 +1746,15 @@
 
     document.body.append(fab, panel);
 
-    // 开合时必须把焦点接过去：fab 一旦 hidden，停在它上面的焦点会掉到 <body>，
-    // 键盘用户就得从整个飞书页面顶部重新 Tab 回来。关闭时再还给 fab。
-    // 焦点落在面板容器而不是第一个控件：Esc 的监听挂在面板上，键盘用户照常能关；
-    // 聚焦 select 会被 Chrome 按键盘语义给 :focus-visible，鼠标用户就张顶一圈焦点环。
-    const open = () => {
-      fab.hidden = true; panel.hidden = false;
-      // 站内跳转不重载脚本，打开时重算一次，来源才真的「跟着页面走」
-      const src = $('fbe-src').value === 'urls' ? 'urls' : sourceForPath(location.pathname);
-      $('fbe-src').value = src;
-      updateSourceControls();
-      // 落在知识库文档页或文件夹页这种目标明确的页面上，打开就直接列出文档，省一次点击；
-      // 知识库首页（src=wiki 但 URL 取不到 token）和「我的云空间」意图不明，不自动跑。
-      // 同一页面不重复列，导出进行中也不跑。scan 自带 try/catch，这里不 await。
-      const concrete = src !== 'urls'
-        && (src === 'folder' || (src === 'wiki' && wikiTokenFromPath(location.pathname)));
-      if (concrete && !running && listedFor !== location.pathname) scan();
-      panel.focus({ preventScroll: true });
-    };
-    const close = () => {
-      panel.hidden = true; fab.hidden = false;
-      fab.focus();
-    };
     // 浮层的标准预期。只在焦点确实在面板里时才响应，免得抢了页面自己的 Esc。
     panel.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !running) { e.stopPropagation(); close(); }
+      if (e.key === 'Escape' && !running) { e.stopPropagation(); closePanel(); }
     });
     const savedPos = readSettings()[FAB_POS_KEY] || {};
     placeFab(fab, savedPos.right ?? 20, savedPos.bottom ?? 150);
-    makeFabDraggable(fab, open);
-    $('fbe-close').onclick = close;
+    makeFabDraggable(fab, openPanel);
+    $('fbe-close').onclick = closePanel;
 
-    // 工具栏图标是第二个入口，走 background 转发过来的消息
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-      chrome.runtime.onMessage.addListener((msg) => {
-        if (msg && msg.type === 'fbe-toggle') (panel.hidden ? open : close)();
-      });
-    }
     $('fbe-scan').onclick = scan;
     $('fbe-q').oninput = applyFilter;
     $('fbe-since').onchange = (e) => selectRecent(Number(e.target.value));
