@@ -118,6 +118,31 @@ test('background: 取消消息会中止同一标签页中的文件名 HEAD 请�
   assert.equal(typeof (await pending.response).error, 'string');
 });
 
+test('background: 读取合法语言包返回内容，非法或不存在的语言返回 null', async () => {
+  const calls = [];
+  const listener = loadBackground(async (url) => {
+    calls.push(url);
+    if (url.includes('_locales/zh_CN/messages.json')) {
+      return { ok: true, json: async () => ({ extName: { message: '飞书导出' } }) };
+    }
+    return { ok: false, status: 404 };
+  });
+
+  const valid = callBackground(listener, { type: 'fbe-locale', lang: 'zh_CN' });
+  assert.equal(valid.keepOpen, true);
+  assert.deepEqual(await valid.response, { extName: { message: '飞书导出' } });
+  assert.equal(calls[0], 'chrome-extension://test/_locales/zh_CN/messages.json');
+
+  const unsafe = callBackground(listener, { type: 'fbe-locale', lang: '../manifest' });
+  assert.equal(unsafe.keepOpen, true);
+  assert.equal(await unsafe.response, null);
+  assert.equal(calls.length, 1, '非法语言名不应发出 fetch 请求');
+
+  const missing = callBackground(listener, { type: 'fbe-locale', lang: 'fr' });
+  assert.equal(missing.keepOpen, true);
+  assert.equal(await missing.response, null);
+});
+
 test('driveFolderTokenFromPath: 认出「我正在看的文件夹」', () => {
   // 别人分享给你的文件夹不在你自己空间的根下，my_space 那两个接口扫不到它，
   // 只能从当前 URL 里取 token 再走 children/list/

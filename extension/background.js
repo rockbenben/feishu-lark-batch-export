@@ -1,10 +1,14 @@
 // content script 自己做不到的浏览器级操作。
 
 // 1. 工具栏图标点击 → 转成一条消息，让面板开合。
-chrome.action.onClicked.addListener((tab) => {
-  if (tab.id != null) chrome.tabs.sendMessage(tab.id, { type: 'fbe-toggle' }).catch(() => {
-    // 页面上没有 content script（比如还停在非飞书页面），忽略即可
-  });
+chrome.action.onClicked.addListener(async (tab) => {
+  if (tab.id != null) {
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type: 'fbe-toggle' });
+    } catch {
+      // 页面上没有 content script（比如还停在非飞书页面），忽略即可
+    }
+  }
 });
 
 const fileNameRequests = new Map();
@@ -22,10 +26,19 @@ function fileNameRequestKey(msg, sender) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   if (msg.type === 'fbe-locale') {
-    fetch(chrome.runtime.getURL(`_locales/${msg.lang}/messages.json`))
-      .then((r) => (r.ok ? r.json() : null))
-      .then(sendResponse)
-      .catch(() => sendResponse(null));
+    const lang = String(msg.lang || '');
+    if (!/^[a-z]{2}(?:_[A-Z]{2})?$/.test(lang)) {
+      sendResponse(null);
+      return true;
+    }
+    (async () => {
+      try {
+        const response = await fetch(chrome.runtime.getURL(`_locales/${lang}/messages.json`));
+        sendResponse(response.ok ? await response.json() : null);
+      } catch {
+        sendResponse(null);
+      }
+    })();
     return true; // 异步回复
   }
 
@@ -54,18 +67,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   fileNameRequests.set(requestKey, controller);
   const timer = setTimeout(() => controller.abort(), 30000);
   const url = `${page.origin}/space/api/box/stream/download/all/${token}`;
-  fetch(url, { method: 'HEAD', credentials: 'include', signal: controller.signal })
-    .then((response) => {
+
+  (async () => {
+    try {
+      const response = await fetch(url, { method: 'HEAD', credentials: 'include', signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const header = response.headers.get('content-disposition');
       if (!header) throw new Error('Content-Disposition missing');
-      return { contentDisposition: header };
-    })
-    .then(sendResponse)
-    .catch((error) => sendResponse({ error: error.message || String(error) }))
-    .finally(() => {
+      sendResponse({ contentDisposition: header });
+    } catch (error) {
+      sendResponse({ error: error.message || String(error) });
+    } finally {
       clearTimeout(timer);
       fileNameRequests.delete(requestKey);
-    });
+    }
+  })();
   return true; // 异步回复
 });
