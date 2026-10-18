@@ -20,7 +20,7 @@ const {
   normalizeExportResult, titleFromExportResult, titleFromDownload,
   requestAttachmentFilename, copyLogText, appendSourceUrl, retryAsync,
   isRetryableDownloadStatus, collectDrivePages, withCleanup, createRequestTracker,
-  pollBeforeDeadline, filenameFromContentDisposition,
+  createInterruptibleWait, pollBeforeDeadline, filenameFromContentDisposition,
 } = mod.exports;
 
 function loadBackground(fetchImpl) {
@@ -217,6 +217,9 @@ test('parseDocumentUrl: 把表格、多维表格和附件 URL 映射到现有导
   });
   assert.deepEqual(parseDocumentUrl(`${origin}/base/BaseToken`, origin), {
     url: `${origin}/base/BaseToken`, kind: 'base', urlToken: 'BaseToken', objType: 8,
+  });
+  assert.deepEqual(parseDocumentUrl(`${origin}/bitable/BitableToken`, origin), {
+    url: `${origin}/bitable/BitableToken`, kind: 'bitable', urlToken: 'BitableToken', objType: 8,
   });
   assert.deepEqual(parseDocumentUrl(`${origin}/file/FileToken`, origin), {
     url: `${origin}/file/FileToken`, kind: 'file', urlToken: 'FileToken', objType: 12,
@@ -656,6 +659,32 @@ test('createRequestTracker: 只中止仍在进行的请求并清空登记', () =
   tracker.abortAll();
 
   assert.deepEqual(aborted, ['second']);
+});
+
+test('createInterruptibleWait: 正常到期解析，且被中止时立即抛出取消错误并清理定时器', async () => {
+  const tracker = createRequestTracker();
+  let stopped = false;
+  const cleared = [];
+  const wait = createInterruptibleWait(
+    tracker,
+    () => stopped,
+    () => { const err = new Error('cancelled'); err.cancelled = true; return err; },
+    (fn) => setTimeout(fn, 10),
+    (timer) => { cleared.push(timer); clearTimeout(timer); },
+  );
+
+  // 1. 正常等待完成
+  await wait(10);
+
+  // 2. 途中收到 abortAll 立即拒绝
+  const pending = wait(10000);
+  tracker.abortAll();
+  await assert.rejects(pending, (e) => e && e.cancelled === true);
+  assert.equal(cleared.length >= 1, true, '应当清理定时器');
+
+  // 3. 已停止状态下直接拒绝
+  stopped = true;
+  await assert.rejects(wait(100), (e) => e && e.cancelled === true);
 });
 
 test('pollBeforeDeadline: 请求耗时计入总时限并限制最后一次请求时间', async () => {

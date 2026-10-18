@@ -22,7 +22,7 @@
   // 飞书标准分享页的第一段路径 -> obj_type。wiki 的 URL token 还要经 getNode
   // 转成真实 obj_token，所以不放在这张直接映射表里。
   const URL_TYPES = Object.freeze({
-    docx: 22, docs: 2, sheets: 3, base: 8, file: 12,
+    docx: 22, docs: 2, sheets: 3, base: 8, bitable: 8, file: 12,
   });
 
   const DRIVE_URL_PATHS = Object.freeze({
@@ -203,7 +203,7 @@
   // 打开别人的知识库时落地页往往正是空间首页，所以这条路径很常见。
   const WIKI_RESERVED = new Set([
     'space', 'spaces', 'settings', 'setting', 'recent', 'favorite', 'favorites',
-    'trash', 'search', 'home', 'template', 'templates', 'shared', 'wiki',
+    'trash', 'recycle', 'catalog', 'overview', 'search', 'home', 'template', 'templates', 'shared', 'wiki',
   ]);
 
   // 返回节点 token；停在知识库的非文档页时返回 null。
@@ -402,6 +402,35 @@
         active.clear();
         for (const request of requests) request.abort();
       },
+    };
+  }
+
+  // 停止信号能打断进行中的网络请求，等待与重试间隔同样需要被即时掐断，
+  // 否则用户点了「停止」还要在原地空等 1.5 秒甚至 30 秒（429 Retry-After）。
+  function createInterruptibleWait(
+    tracker,
+    isStopped,
+    createCancelledError,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+  ) {
+    return function interruptibleWait(ms) {
+      if (isStopped()) return Promise.reject(createCancelledError());
+      let timer;
+      let cancelRequest;
+      return new Promise((resolve, reject) => {
+        cancelRequest = {
+          abort() {
+            clearTimeoutFn(timer);
+            reject(createCancelledError());
+          },
+        };
+        const release = tracker.track(cancelRequest);
+        timer = setTimeoutFn(() => {
+          release();
+          resolve();
+        }, ms);
+      });
     };
   }
 
@@ -659,7 +688,7 @@
       normalizeExportResult, titleFromExportResult, titleFromDownload, filenameFromContentDisposition,
       requestAttachmentFilename,
       copyLogText, appendSourceUrl, retryAsync, withCleanup,
-      createRequestTracker, pollBeforeDeadline,
+      createRequestTracker, createInterruptibleWait, pollBeforeDeadline,
       isRetryableDownloadStatus, sourceUrlForNode, collectDrivePages,
     };
   }
@@ -686,10 +715,13 @@
     return error;
   }
 
-  // 重试间隔也要能被「停止」打断：429 带 Retry-After 时这里最长等 30 秒，等完才发现
-  // 已经点了停止，等于按钮白按。retryAsync 保持纯函数，停止判断放在注入的 wait 里。
-  const interruptibleWait = (ms) =>
-    (stopped ? Promise.reject(cancelledError()) : sleep(ms));
+  // 重试间隔也要能被「停止」打断：429 带 Retry-After 时最长等 30 秒，文档间留的 1.5 秒也是，
+  // 登记进 activeRequests 后按「停止」立刻中止等待并抛出 cancelled，不必空等。
+  const interruptibleWait = createInterruptibleWait(
+    activeRequests,
+    () => stopped,
+    cancelledError,
+  );
 
   // 无回调的 sendMessage 把失败留在 chrome.runtime.lastError 里，只在控制台刷一条
   // "Unchecked runtime.lastError"。回读 lastError 才能把失败变成能 catch 的拒绝。
@@ -1025,7 +1057,28 @@
     try {
       const copied = await copyLogText(
         $('fbe-log').textContent,
-        (text) => navigator.clipboard.writeText(text),
+        async (text) => {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            try {
+              await navigator.clipboard.writeText(text);
+              return;
+            } catch (err) {
+              // 宿主页面失去焦点或权限受阻时尝试 textarea 降级
+            }
+          }
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          ta.style.top = '-9999px';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          const ok = document.execCommand('copy');
+          ta.remove();
+          if (!ok) throw new Error('copy command failed');
+        },
       );
       button.textContent = copied ? t('copyLogDone') : t('copyLogFailed');
       button.title = button.textContent;
@@ -1240,6 +1293,7 @@
     const out = readSettings(); // 先读回来：里面还有不是控件的键（按钮位置），别覆盖没了
     for (const id of SETTING_IDS) {
       const el = $(id);
+      if (!el) continue;
       out[id] = el.type === 'checkbox' ? el.checked : el.value;
     }
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(out)); } catch (e) { /* 无痕模式等，忽略 */ }
@@ -1498,7 +1552,12 @@
         failed.push(items[i]);
         log(appendSourceUrl(t('itemFailed', node.title, e.message), node.source_url));
       }
-      await sleep(1500); // 导出是服务端排队任务，别并发压它
+      try {
+        await interruptibleWait(1500); // 导出是服务端排队任务，别并发压它
+      } catch (e) {
+        if (e && e.cancelled && stopped) { log(t('stopped')); break; }
+        throw e;
+      }
     }
 
     if (files.length === 1) {
