@@ -364,6 +364,14 @@
     return `${(bytes / 1048576).toFixed(1)} MB`;
   }
 
+  // 备份文件的日期应跟用户日历一致。toISOString 是 UTC：本地凌晨 0–8 点导出
+  // 会得到“昨天”的文件名，按日期找备份时正好差一天。
+  function localDateStamp(date = new Date()) {
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${date.getFullYear()}-${month}-${day}`;
+  }
+
   async function copyLogText(text, writeText) {
     const value = String(text == null ? '' : text);
     if (!value) return false;
@@ -682,7 +690,7 @@
       crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem, descendantEnd,
       buildDescendantEnds,
       buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime, withExt, addTokenToFilename,
-      formatSize, readCookie,
+      formatSize, localDateStamp, readCookie,
       wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
       parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
       normalizeExportResult, titleFromExportResult, titleFromDownload, filenameFromContentDisposition,
@@ -1017,11 +1025,18 @@
   let failed = [];
   let stopped = false;
   let running = false;
+  let scanning = false;
   let selectedUrlFile = null;
   let copyFeedbackTimer = null;
   // 上次成功列出的是哪个页面。打开面板时落在目标明确的页面（知识库文档页/文件夹页）
   // 就自动列一次，同一页面不重复列；「我的云空间」意图不明确，不自动跑。
   let listedFor = null;
+  // 列表是由哪个来源列出来的。当前页可能同时支持多个来源（在知识库页选「我的云空间」），
+  // 重开面板时不能只按 URL 猜来源 —— 否则下拉写着「当前知识库」，树里却是云空间的内容。
+  let listedSource = null;
+  // 上一次成功列出是 0 项。空态文案和来源在重开/换语言后都要继续成立，
+  // 不能被 emptyInviteText 当成「还没列过」重新邀请一次。
+  let listedEmpty = false;
 
   const $ = (id) => document.getElementById(id);
 
@@ -1127,18 +1142,35 @@
   function refreshCount() {
     const boxes = checkboxes();
     const n = boxes.filter((c) => c.checked).length;
-    $('fbe-count').textContent = rows.length ? t('selectedCount', n, rows.length) : '';
+    $('fbe-count').textContent = rows.length && !scanning ? t('selectedCount', n, rows.length) : '';
     // 半选这套词汇树行都有，发起全选的框也该有：部分选中时亮横杠，
     // 点它走浏览器原生语义（先清后勾），而不是「再勾更多」。
     const live = boxes.filter((c) => !c.disabled).length;
+    // checked 与 indeterminate 都要跟真实勾选同步。只维护 indeterminate 时，
+    // 程序化清空勾选（按时间勾选 0 命中）会把「全选」留在已勾状态；
+    // 反过来逐条勾满后它又停在未勾状态 —— 两种都在跟计数行打架。
+    $('fbe-all').checked = live > 0 && n === live;
     $('fbe-all').indeterminate = n > 0 && n < live;
-    $('fbe-start').disabled = running || n === 0;
+    // 列出过程中旧列表还在 DOM 里（只是藏起来了），此时导出、换来源都会作用在旧树上。
+    // 把会改变「正在列什么/导什么」的控件一起锁住，扫描结束再由这里统一放开。
+    $('fbe-start').disabled = running || scanning || n === 0;
+    $('fbe-scan').disabled = running || scanning;
+    $('fbe-src').disabled = scanning;
+    $('fbe-url-choose').disabled = scanning;
+    $('fbe-url-file').disabled = scanning;
+    // 没列表可筛、或正在列列表时，输入筛选只会得到「没有标题匹配」，
+    // 看起来像已经列完但没有结果。跟着列表一起启用/禁用。
+    $('fbe-q').disabled = scanning || rows.length === 0;
     // 主按钮跟着当前这一步走：还没列出东西时，该点的是「列出文档」；
     // 列出来了，重心才移到「开始导出」。任何时刻只有一个显眼的下一步。
-    $('fbe-scan').classList.toggle('fbe-btn--go', rows.length === 0 && !running);
+    $('fbe-scan').classList.toggle('fbe-btn--go', rows.length === 0 && !running && !scanning);
     // 还没列出东西之前，那几个只对列表生效的控件不该看起来能用
-    $('fbe-all').disabled = rows.length === 0;
-    $('fbe-since').disabled = rows.length === 0;
+    $('fbe-all').disabled = rows.length === 0 || scanning;
+    // URL 列表没有修改时间（editTime=0），按时间勾选只会清空已有选择、勾中 0 篇。
+    // 与其让用户白点一次再猜为什么全没了，不如直接禁用并说明。
+    const hasEditTime = rows.some((row) => editTime(row.node) > 0);
+    $('fbe-since').disabled = rows.length === 0 || scanning || !hasEditTime;
+    $('fbe-since').title = rows.length && !hasEditTime ? t('recentNoTime') : t('recentTip');
   }
 
   // 列表为空时，让位给一句「接下来做什么」，而不是留一片空白。
@@ -1150,15 +1182,27 @@
     if (text) $('fbe-empty').textContent = text;
   }
 
-  // 空态开场白跟着当前来源走：URL 模式的下一步是「选好 TXT」，不是「选好来源」
+  // 空态开场白跟着当前来源走：URL 模式的下一步是「选好 TXT」，不是「选好来源」。
+  // 知识库首页/设置页没有文档 token，点什么都不会有结果 —— 开场就说清楚该去哪儿，
+  // 不要等用户点了「列出文档」再抛一条错误。
   function emptyInviteText() {
-    return $('fbe-src').value === 'urls' ? t('emptyInviteUrls') : t('emptyInvite');
+    const src = $('fbe-src').value;
+    if (src === 'urls') return t('emptyInviteUrls');
+    if (src === 'wiki'
+      && /\/wiki\//.test(location.pathname)
+      && !wikiTokenFromPath(location.pathname)) return t('emptyWikiHome');
+    if (listedEmpty && src === listedSource
+      && listedFor === (src === 'urls' ? 'urls' : location.pathname)) return t('emptyNoDocs');
+    return t('emptyInvite');
   }
 
   // 过滤只管显示，不碰勾选状态 —— 行是 CSS 隐藏的，checkbox 还在 DOM 里，
   // checkboxes() 与 rows 的下标对应关系因此不受影响。
   function applyFilter() {
     const q = $('fbe-q').value.trim().toLowerCase();
+    // 「全选」在有筛选时只作用于可见行。标签必须说清楚，否则用户清掉筛选后
+    // 才发现只勾了刚才看到的那几条 —— 备份少文件比多文件更难发现。
+    $('fbe-all-label').textContent = q ? t('selectAllFiltered') : t('selectAll');
     const lines = Array.from($('fbe-tree').children);
     if (!q) {
       lines.forEach((l) => { l.hidden = false; });
@@ -1206,10 +1250,16 @@
       // 是把失败推迟到导出之后才告诉他。pickFormat 返回 null 只跟类型有关，
       // 跟当前选的格式无关，所以这里就能定。
       const exportable = !!pickFormat(row.node.obj_type, 'auto');
+      // 目录不是「飞书在本地生成、扩展拿不到」，它只是没有自己的文件可导。
+      // 用 notExportable 套在目录上会显示「类型 4导不出来……」，既是术语又给错原因。
+      const folderLike = isFolder(row.node) || (row.node.has_child && !TYPES[row.node.obj_type]);
+      if (folderLike) line.classList.add('fbe-group');
       if (!exportable) {
         cb.disabled = true;
         line.classList.add('fbe-dead');
-        line.title = t('notExportable', typeName(row.node.obj_type));
+        line.title = folderLike
+          ? t('notExportableFolder')
+          : t('notExportable', typeName(row.node.obj_type));
       }
       // 标题左、类型右，两列对齐 —— 这才让它读起来像一张装箱单，而不是文件选择器
       const label = document.createElement('label');
@@ -1219,8 +1269,7 @@
       if (exportable) label.title = row.node.title || t('untitled');
       const tag = document.createElement('em');
       tag.className = 'fbe-kind';
-      tag.textContent = row.node.has_child && !TYPES[row.node.obj_type]
-        ? t('typeFolder') : typeName(row.node.obj_type);
+      tag.textContent = folderLike ? t('typeFolder') : typeName(row.node.obj_type);
       // 默认连带子孙（「导出整个目录」是最常见的操作）；按住 Alt 只作用于这一条，
       // 于是「只要目录本身这篇」和「取消目录但保留已勾的子项」都是单次操作。
       const toggle = (cascade) => {
@@ -1237,6 +1286,27 @@
       cb.onclick = (e) => toggle(!e.altKey);
       // 程序化赋值绕得过 disabled —— 不挡住 label 点击，「导不出不给勾」就只是画给人看的
       label.onclick = (e) => {
+        // 目录自己的框不能勾，但名字可以当「全选这个目录」的入口：
+        // 任何一篇后代没勾就补齐，全勾了再点就清空。目录本身始终不进入导出集合。
+        if (folderLike) {
+          const boxes = checkboxes();
+          const treeLines = $('fbe-tree').children;
+          const end = rowEnd(i);
+          let anyUnchecked = false;
+          // 和「全选」同一口径：筛选时必须只看可见行，别把藏起来的文档也打包。
+          for (let j = i + 1; j < end; j++) {
+            if (!boxes[j].disabled && !treeLines[j].hidden && !boxes[j].checked) {
+              anyUnchecked = true;
+              break;
+            }
+          }
+          for (let j = i + 1; j < end; j++) {
+            if (!boxes[j].disabled && !treeLines[j].hidden) boxes[j].checked = anyUnchecked;
+          }
+          refreshMarks();
+          refreshCount();
+          return;
+        }
         if (cb.disabled) return;
         cb.checked = !cb.checked;
         toggle(!e.altKey);
@@ -1380,23 +1450,33 @@
   }
 
   async function scan() {
-    const button = $('fbe-scan');
-    button.disabled = true;
+    if (scanning) return; // 收起面板再打开不该把同一棵树再扫一遍
+    scanning = true;
+    listedEmpty = false;
+    // 旧树的勾选马上就会被新列表替换；先清掉，扫描期间的「全选」才不会停在
+    // 上一轮的已勾状态（计数这时已经为空，看起来像新列表全被选中了）。
+    checkboxes().forEach((c) => { c.checked = false; c.indeterminate = false; });
+    refreshCount(); // 立刻锁住导出/来源/TXT/勾选控件，不等第一次网络回包
+    // 新列表是一次新的会话：上一轮导出的进度条、重试按钮和失败队列都指向旧树。
+    // 日志马上要被清空，若把这些留着，用户会看到「7 / 7」和新列表并列，
+    // 或者一个再也找不到失败原因的重试按钮。
+    $('fbe-progress').hidden = true;
+    $('fbe-progress-text').textContent = '';
+    $('fbe-progress-fill').style.width = '0%';
+    $('fbe-retry').hidden = true;
+    failed = [];
+    lastProgress = { done: 0, total: 0 };
     $('fbe-log').textContent = '';
     logHasLines = false;
     $('fbe-log-wrap').hidden = true;
     $('fbe-log-wrap').classList.remove('fbe-log-tools-on');
     showEmpty(t('listing'), true);
     try {
-      let folders = 0;
       let expanded = 0;
-      // folders 与树上的类型标签同一口径：有子节点、且类型本身导不出来，才显示为「目录」。
-      // 拿 has_child 计数会把「挂了子文档的普通文档」也算进去，两个数对不上会被当成读错了树。
       // 进度句说的是「干了多久」（展开次数），不是「数出来几个目录」——
       // 一棵全是带子文档的普通文档的树（知识库常态）目录数恒为 0，报 0 看着像卡住。
-      const onFolder = (node) => {
+      const onFolder = () => {
         expanded++;
-        if (node && TYPES[node.obj_type] == null) folders++;
         if (expanded % 10 === 0) showEmpty(t('listExpanded', expanded), true);
       };
       // 子文件夹打不开只跳过它那棵子树，名字记下来列完报给用户 —— 备份工具最怕
@@ -1429,10 +1509,16 @@
       }
       rows = flatten(items);
       listedFor = src === 'urls' ? 'urls' : location.pathname;
+      listedSource = src;
+      listedEmpty = rows.length === 0;
       renderTree();
+      // 列完了但一个都没有：空态不能再邀请「点列出文档」，那正是用户刚做的事
+      if (!rows.length) showEmpty(t('emptyNoDocs'));
+      // 「全选」只会选中可导出的行；日志说清总数里有多少真的能导，
+      // 否则 500 条全选后只勾上 480 条，用户会以为漏了 20 条。
+      const exportableCount = rows.filter((row) => !!pickFormat(row.node.obj_type, 'auto')).length;
       if (src === 'urls') log(t('urlListDone', rows.length));
-      // 一个目录都没有时不写「其中 0 个目录」—— 零不是信息
-      else if (folders) log(t('listDone', rows.length, folders));
+      else if (rows.length > exportableCount) log(t('listDoneExportable', rows.length, exportableCount));
       else log(t('listDonePlain', rows.length));
       if (skips.length) log(t('listSkipped', skips.length, skips.slice(0, 5).join('; ')));
     } catch (e) {
@@ -1443,7 +1529,8 @@
       log(t('listFailed', e.message));
       showEmpty(t('emptyFailed'));
     } finally {
-      button.disabled = false;
+      scanning = false;
+      refreshCount(); // 扫描期间被锁住的控件在这里统一放开
     }
   }
 
@@ -1492,6 +1579,7 @@
     const usedImgDirs = new Set();
     const seq = new Map();
     const files = [];   // {path, blob, crc, size}
+    const done = new Set();
 
     for (let i = 0; i < items.length; i++) {
       if (stopped) { log(t('stopped')); break; }
@@ -1547,6 +1635,7 @@
           files.push(await toEntry(name, blob));
           log(t('okPlain', name));
         }
+        done.add(items[i]);
       } catch (e) {
         if (e && e.cancelled && stopped) { log(t('stopped')); break; }
         failed.push(items[i]);
@@ -1560,16 +1649,29 @@
       }
     }
 
+    // 停止后把已完成的条目取消勾选：树里的勾选是「下一次会导出什么」，
+    // 不取消的话再点开始会把刚导过的一批原样重做，用户还以为是在续传。
+    if (stopped && done.size) {
+      const boxes = checkboxes();
+      rows.forEach((row, i) => {
+        if (done.has(row) && boxes[i]) boxes[i].checked = false;
+      });
+      refreshMarks();
+    }
+
     if (files.length === 1) {
       // 只有一个文件就不打包了。但 a.download 里的 '/' 会被浏览器清洗掉，
       // 带目录前缀的话文件名会变成一坨，所以这里只取最后一段。
       triggerBlobDownload(files[0].blob, files[0].path.split('/').pop());
-      log(t('doneSingle'));
+      if (stopped) log(t('doneSinglePartial'));
+      else log(t('doneSingle'));
     } else if (files.length > 1) {
-      const stamp = new Date().toISOString().slice(0, 10);
+      const stamp = localDateStamp();
       const zip = new Blob(zipParts(files), { type: 'application/zip' });
       triggerBlobDownload(zip, `${t('zipBaseName')}-${stamp}.zip`);
-      log(t('doneZip', files.length, formatSize(zip.size)));
+      // 停止时只说「已打包」，不要用「导出完成」冒充 7 篇都跑完了
+      if (stopped) log(t('doneZipPartial', files.length, formatSize(zip.size)));
+      else log(t('doneZip', files.length, formatSize(zip.size)));
     } else {
       log(t('doneNothing'));
     }
@@ -1637,6 +1739,11 @@
     };
     fab.addEventListener('pointerup', (e) => finishDrag(e, false));
     fab.addEventListener('pointercancel', (e) => finishDrag(e, true));
+    // 指针点击在 pointerup 里已经处理；键盘（Enter/Space）和辅助技术触发的是
+    // detail=0 的 click，没有这条，Tab 到浮标后按回车什么也不会发生。
+    fab.addEventListener('click', (e) => {
+      if (e.detail === 0) onClick();
+    });
   }
 
   // 窗口变小后，存下来的位置可能已经在屏幕外了（全局注册一次，避免面板重建反复泄漏）
@@ -1650,8 +1757,9 @@
     const urlMode = $('fbe-src').value === 'urls';
     $('fbe-url-row').hidden = !urlMode;
     $('fbe-url-name').textContent = selectedUrlFile ? selectedUrlFile.name : t('urlNoFile');
-    // 还没列出东西时，开场白跟着来源改：URL 模式的下一步是选文件
-    if (!rows.length) showEmpty(emptyInviteText());
+    // 还没列出东西时，开场白跟着来源改：URL 模式的下一步是选文件。
+    // 但列出过程中来源自动切换也会走到这里，不能把「正在列出…」擦掉换成开场白。
+    if (!rows.length && !scanning) showEmpty(emptyInviteText());
   }
 
   function openPanel() {
@@ -1660,16 +1768,34 @@
     if (!fab || !panel) return;
     fab.hidden = true;
     panel.hidden = false;
-    // 站内跳转不重载脚本，打开时重算一次，来源才真的「跟着页面走」
-    const src = $('fbe-src').value === 'urls' ? 'urls' : sourceForPath(location.pathname);
+    // 站内跳转不重载脚本，打开时重算一次，来源才真的「跟着页面走」。
+    // 但如果当前页面上已经列出了一批文档，下拉必须改成那批文档的真实来源：
+    // 在知识库页列「我的云空间」、收起再打开时，不能显示成「当前知识库」；
+    // 切到 URL 模式但还没列出时收起再打开，也不能让下拉说 URL、树里是旧来源。
+    const currentSrc = $('fbe-src').value;
+    const pathSrc = sourceForPath(location.pathname);
+    // 页面本身值不值得自动重列：知识库文档页/文件夹页明确，首页和云空间首页不明确。
+    const pageConcrete = pathSrc === 'folder'
+      || (pathSrc === 'wiki' && !!wikiTokenFromPath(location.pathname));
+    // URL 列表的 listedFor 是 'urls'（不跟页面路径）；它同样应该锁住真实来源。
+    const hasListed = (rows.length || listedEmpty) && listedSource
+      && (listedFor === 'urls' || listedFor === location.pathname);
+    let src;
+    if (hasListed) {
+      src = listedSource;
+    } else if (rows.length && listedSource && (currentSrc === 'urls' || !pageConcrete)) {
+      // 列表来自别的页面，而当前页面不会（或因 URL 模式不会）自动重列：
+      // 保留下拉跟可见树一致，别让「我的云空间」下挂着知识库的树。
+      src = listedSource;
+    } else {
+      src = currentSrc === 'urls' ? 'urls' : pathSrc;
+    }
     $('fbe-src').value = src;
     updateSourceControls();
-    // 落在知识库文档页或文件夹页这种目标明确的页面上，打开就直接列出文档，省一次点击；
-    // 知识库首页（src=wiki 但 URL 取不到 token）和「我的云空间」意图不明，不自动跑。
-    // 同一页面不重复列，导出进行中也不跑。scan 自带 try/catch，这里不 await。
-    const concrete = src !== 'urls'
-      && (src === 'folder' || (src === 'wiki' && wikiTokenFromPath(location.pathname)));
-    if (concrete && !running && listedFor !== location.pathname) scan();
+    // 只有当前页面本身是知识库文档/文件夹、且下拉确实指向本页来源时才自动重列；
+    // 否则树来自别的页面时会被误扫成当前页的文件夹/知识库。
+    const concrete = pageConcrete && src === pathSrc;
+    if (concrete && !running && !scanning && listedFor !== location.pathname) scan();
     panel.focus({ preventScroll: true });
   }
 
@@ -1747,7 +1873,7 @@
 
       <div class="fbe-row fbe-row--tally">
         <span id="fbe-count"></span>
-        <label class="fbe-check"><input type="checkbox" id="fbe-all">${t('selectAll')}</label>
+        <label class="fbe-check"><input type="checkbox" id="fbe-all"><span id="fbe-all-label">${t('selectAll')}</span></label>
         <select id="fbe-since" title="${t('recentTip')}">
           <option value="0">${t('recentHead')}</option>
           <option value="7">${t('recentDays', 7)}</option>
@@ -1806,8 +1932,14 @@
     document.body.append(fab, panel);
 
     // 浮层的标准预期。只在焦点确实在面板里时才响应，免得抢了页面自己的 Esc。
+    // 输入框和下拉框有自己的 Esc 语义（清空搜索、收起选项），不能一并关掉面板。
     panel.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !running) { e.stopPropagation(); closePanel(); }
+      const tag = e.target && e.target.tagName;
+      const formControl = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
+      if (e.key === 'Escape' && !running && !formControl) {
+        e.stopPropagation();
+        closePanel();
+      }
     });
     const savedPos = readSettings()[FAB_POS_KEY] || {};
     placeFab(fab, savedPos.right ?? 20, savedPos.bottom ?? 150);
@@ -1863,7 +1995,29 @@
     const logText = $('fbe-log') ? $('fbe-log').textContent : '';
     const checkedBefore = checkboxes().map((c) => c.checked);
     const query = $('fbe-q') ? $('fbe-q').value : '';
-    const source = $('fbe-src') ? $('fbe-src').value : sourceForPath(location.pathname);
+    const currentSource = $('fbe-src') ? $('fbe-src').value : sourceForPath(location.pathname);
+    // 重建也要跟可见列表的真实来源走；只跟当前下拉走会保留一个未列出的 URL 模式，
+    // 树里却是上一次列出的云空间/知识库内容。
+    const hasListed = (rows.length || listedEmpty) && listedSource
+      && (listedFor === 'urls' || listedFor === location.pathname);
+    const source = hasListed ? listedSource : currentSource;
+    // 换语言时新面板默认是空闲态：运行中的「停止」、进度条、以及结束后的
+    // 重试按钮都会消失。后台的活儿和已经跑完的结果都还在，界面不能假装没有。
+    const progressBefore = !$('fbe-progress').hidden
+      ? {
+          text: $('fbe-progress-text').textContent,
+          width: $('fbe-progress-fill').style.width,
+        }
+      : null;
+    // 列出可能跑上几分钟（大知识库）。换语言不能把「正在列出…」换成开场白、
+    // 也不能让「列出文档」重新变成可点 —— 那会看起来像没在跑，或者再起一个扫描。
+    const scanBefore = scanning
+      ? {
+          visible: !$('fbe-empty').hidden,
+          text: $('fbe-empty').textContent,
+          busy: $('fbe-empty').classList.contains('busy'),
+        }
+      : null;
 
     // 上面读的是旧面板的勾选状态，下面整个面板连同 fbe-tree 都会被换掉 ——
     // 缓存里那批 checkbox 此时已经脱离文档，不作废的话后面会拿着它们去数新面板。
@@ -1886,7 +2040,30 @@
       refreshCount();
       applyFilter();
     }
-    if (wasOpen) { $('fbe-fab').hidden = true; $('fbe-panel').hidden = false; }
+    if (progressBefore) {
+      $('fbe-progress').hidden = false;
+      $('fbe-progress-text').textContent = progressBefore.text;
+      $('fbe-progress-fill').style.width = progressBefore.width;
+    }
+    if (running) {
+      $('fbe-start').hidden = true;
+      $('fbe-stop').hidden = false;
+      $('fbe-scan').disabled = true;
+    } else if (failed.length) {
+      $('fbe-retry').hidden = false;
+      $('fbe-retry').textContent = t('btnRetry', failed.length);
+    }
+    if (scanning) {
+      showEmpty(scanBefore && scanBefore.visible ? scanBefore.text : t('listing'),
+        scanBefore ? scanBefore.busy : true);
+    }
+    if (wasOpen) {
+      $('fbe-fab').hidden = true;
+      $('fbe-panel').hidden = false;
+      // 面板刚刚被整个换掉，焦点会掉回 body；键盘用户换完语言就找不到原来的位置了
+      const lang = $('fbe-lang');
+      if (lang) lang.focus();
+    }
   }
 
   async function boot() {

@@ -39,12 +39,15 @@ const SLOW = QS.get('slow') === '1';
 const FROZEN = QS.get('freeze') === '1'; // 第 3 个导出请求永不返回：把面板钉死在运行中
 const BIG = QS.get('big') === '1';       // 14 个 docx 容器大树：测「已展开 N 个目录」进度句
 const FAILALL = QS.get('failall') === '1'; // 全部导出失败：测错误日志压力
+const OLD = QS.get('old') === '1';         // 所有文档都很久没改：测「7/30/90 天」0 命中的清空
+const NOTIME = QS.get('notime') === '1';   // 所有文档都没有修改时间（同 URL 列表）
+const HUGE = Number(QS.get('huge') || 0);   // 根下生成 N 条：测大数据量下的浏览/筛选/全选
 let createHits = 0;
 let childHits = 0;
 if (!QS.get('keepsettings')) localStorage.clear(); // 每次载入都当全新安装，避免状态串台
 
 const DAY = 86400;
-const editAgo = (d) => Math.floor(Date.now() / 1000) - d * DAY;
+const editAgo = (d) => (NOTIME ? 0 : Math.floor(Date.now() / 1000) - (d + (OLD ? 1000 : 0)) * DAY);
 
 // wiki 节点：F1/E1 是 type 4「目录」（不可勾）；FF 是挂子节点的 docx 容器（可勾、级联）
 function wn(token, objType, title, hasChild, daysAgo) {
@@ -85,6 +88,15 @@ if (BIG) {
     const kid = wn(`BIGK${i}`, 22, `子文档 ${i}`, false, 3);
     WIKI_CHILDREN[`wikBIG${i}`] = [kid];
     tops.push(parent);
+  }
+  WIKI_CHILDREN.VROOT = tops;
+}
+// 混入少量目录/思维笔记：让「全选 = 460 / 500」这种计数在真实规模下也能被看到
+if (HUGE) {
+  const tops = [];
+  for (let i = 1; i <= HUGE; i++) {
+    const type = i % 50 === 0 ? 11 : (i % 25 === 0 ? 4 : 22);
+    tops.push(wn(`H${i}`, type, `季度归档文档 ${String(i).padStart(3, '0')}`, false, i % 90));
   }
   WIKI_CHILDREN.VROOT = tops;
 }

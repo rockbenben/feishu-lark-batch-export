@@ -126,7 +126,8 @@
   font: 12px/1.4 var(--sans); box-sizing: border-box;
 }
 #fbe-panel input[type=search]::placeholder { color: var(--dim) }
-#fbe-panel select:disabled { opacity: .45 }
+#fbe-panel select:disabled,
+#fbe-panel input[type=search]:disabled { opacity: .45 }
 
 .fbe-btn {
   padding: 6px 13px; border: 1px solid var(--line); border-radius: 5px;
@@ -194,6 +195,8 @@
 /* 导不出来的类型：勾不上，也别让它看起来像能勾 */
 .fbe-dead { opacity: .42 }
 .fbe-dead .fbe-name { cursor: default }
+/* 目录框不可勾，但目录名是「选整个目录」的入口，光标要告诉人这里能点 */
+.fbe-group .fbe-name { cursor: pointer }
 
 #fbe-empty {
   min-height: 88px; margin: 0;

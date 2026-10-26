@@ -13,7 +13,7 @@ const {
   pickFormat, sanitizeName, uniqueName, uniqueDir, imageDirName, flatten, findSpaceRoot,
   crc32, zipParts, imageExt, mdImageUrls, rewriteImageLinks, safeSlug, buildStem,
   descendantEnd, buildDescendantEnds, buildDirPrefix, nextSeq, etaSeconds, isFolder, asNode, editTime,
-  withExt, formatSize, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
+  withExt, formatSize, localDateStamp, readCookie, wikiTokenFromPath, driveFolderTokenFromPath, sourceForPath,
   sourceUrlForNode,
   parseDocumentUrl, parseUrlText, buildDirectNode, resolveUrlItem,
   addTokenToFilename,
@@ -496,6 +496,12 @@ test('formatSize: 小体积不报 0.0 MB', () => {
   assert.equal(formatSize(300 * 1024), '300 KB');
   assert.equal(formatSize(3 * 1048576), '3.0 MB');
   assert.equal(formatSize(12.34 * 1048576), '12.3 MB');
+});
+
+test('localDateStamp: 用本地日历日期，不用 UTC 日期', () => {
+  // 用本地时间构造，避免测试机时区影响；凌晨 0:30 仍应属于当天
+  assert.equal(localDateStamp(new Date(2026, 9, 27, 0, 30)), '2026-10-27');
+  assert.equal(localDateStamp(new Date(2026, 0, 1, 23, 59)), '2026-01-01');
 });
 
 test('copyLogText: 完整复制多行日志', async () => {

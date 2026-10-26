@@ -16,6 +16,7 @@ import path from 'node:path';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const PAGE_TIMEOUT_MS = 60_000;
+const ZH = JSON.parse(await readFile(path.join(ROOT, 'extension', '_locales', 'zh_CN', 'messages.json'), 'utf8'));
 
 // ───────────────────────── 静态服务（只暴露夹具与真实扩展） ─────────────────────────
 const MIME = {
@@ -148,8 +149,23 @@ async function realClick(index, modifiers = 0) {
   return true;
 }
 
-async function openFixture(query) {
-  await S('Page.navigate', { url: `${BASE}/wiki/TESTTOKEN?${query}` });
+async function realClickName(text) {
+  const pt = await evalJS(`(() => {
+    const el = [...document.querySelectorAll('#fbe-tree .fbe-name')]
+      .find((e) => e.textContent === ${JSON.stringify(text)});
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  })()`);
+  if (!pt) return false;
+  await S('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+  await S('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+  await new Promise((r) => setTimeout(r, 120));
+  return true;
+}
+
+async function openFixture(query, page = '/wiki/TESTTOKEN') {
+  await S('Page.navigate', { url: `${BASE}${page}?${query}` });
   const t0 = Date.now();
   while (Date.now() - t0 < PAGE_TIMEOUT_MS) {
     const r = value(await S('Runtime.evaluate', { expression: 'window.__ready', returnByValue: true }));
@@ -192,8 +208,13 @@ try {
     const bs=[...document.querySelectorAll('${CB}')];
     return ls.map((l,i)=>({ i, disabled: bs[i].disabled,
       title:(l.querySelector('.fbe-name')||{}).textContent,
+      titleAttr:l.title,
       kind:(l.querySelector('.fbe-kind')||{}).textContent }));
   })()`);
+  const folderRow = rows.find((r) => r.kind === '目录');
+  check('目录行解释的是「目录不能导出」，而不是内部类型号',
+    folderRow && folderRow.titleAttr === ZH.notExportableFolder.message,
+    `"${folderRow ? folderRow.titleAttr : '无目录行'}"`);
   const d = (await treeState()).depth;
   let pIdx = -1;
   for (let i = 0; i < d.length - 1; i++) if (d[i + 1] > d[i] && !rows[i].disabled) { pIdx = i; break; }
@@ -204,6 +225,10 @@ try {
   check('夹具把真实 content.js 渲染出列表', s0.total > 0, `checkbox=${s0.total}`);
   check('导不出的类型（目录/思维笔记）不给勾', s0.disabled > 0, `disabled 行=${s0.disabled}`);
   check('树里存在「可导出且带子文档」的行', pIdx >= 0, `#${pIdx}「${rows[pIdx]?.title}」(${rows[pIdx]?.kind}) 后代=${kids}`);
+  const listLog = await evalJS(`document.getElementById('fbe-log').textContent`);
+  const expectedListLog = ZH.listDoneExportable.message.replace('$1', '11').replace('$2', '7');
+  check('列表日志说明总数里有多少可导出', listLog.includes(expectedListLog),
+    `"${listLog}" 期望含 "${expectedListLog}"`);
 
   if (pIdx >= 0) {
     await uncheckAll();
@@ -227,6 +252,54 @@ try {
     check('只勾深层后代时祖先呈半选', s.indeterminate >= 1, `indeterminate=${s.indeterminate}`);
   }
 
+  // 目录名是组选择入口：勾/清它下面的可导出后代，但目录本身永远不进入勾选
+  const folder = rows.find((r) => r.kind === '目录' && r.i < d.length - 1 && d[r.i + 1] > d[r.i]);
+  if (folder) {
+    let folderEnd = folder.i + 1;
+    while (folderEnd < d.length && d[folderEnd] > d[folder.i]) folderEnd++;
+    const folderDesc = rows.slice(folder.i + 1, folderEnd).filter((r) => !r.disabled).length;
+    await uncheckAll();
+    const clicked = await realClickName(folder.title);
+    const sGroup = await treeState();
+    const folderBox = await evalJS(`(() => {
+      const b=document.querySelectorAll('${CB}')[${folder.i}];
+      return { checked:b.checked, disabled:b.disabled, indeterminate:b.indeterminate };
+    })()`);
+    check('点目录名选中全部可导出后代，目录自身仍不可勾',
+      clicked && sGroup.checked === folderDesc && folderBox.disabled
+        && !folderBox.checked && folderBox.indeterminate,
+      `clicked=${clicked} checked=${sGroup.checked} 期望=${folderDesc} box=${JSON.stringify(folderBox)}`);
+    await realClickName(folder.title);
+    const sGroup2 = await treeState();
+    const folderBox2 = await evalJS(`document.querySelectorAll('${CB}')[${folder.i}].indeterminate`);
+    check('再点目录名清空该目录的选择',
+      sGroup2.checked === 0 && !folderBox2,
+      `checked=${sGroup2.checked} folder.indeterminate=${folderBox2}`);
+
+    // 筛选时目录组也只选可见项，不能把被筛掉的文档偷偷带上
+    await evalJS(`(() => { const q=document.getElementById('fbe-q'); q.value='登录'; q.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    await new Promise((r) => setTimeout(r, 150));
+    const visibleDesc = await evalJS(`(() => {
+      const lines=document.getElementById('fbe-tree').children;
+      const boxes=document.querySelectorAll('${CB}');
+      let n=0;
+      for (let j=${folder.i + 1}; j<${folderEnd}; j++) {
+        if (!lines[j].hidden && !boxes[j].disabled) n++;
+      }
+      return n;
+    })()`);
+    await realClickName(folder.title);
+    const sFilteredGroup = await treeState();
+    check('筛选后点目录名只选可见文档',
+      sFilteredGroup.checked === visibleDesc && visibleDesc > 0 && visibleDesc < folderDesc,
+      `checked=${sFilteredGroup.checked} visible=${visibleDesc} all=${folderDesc}`);
+    await evalJS(`(() => { const q=document.getElementById('fbe-q'); q.value=''; q.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    await new Promise((r) => setTimeout(r, 150));
+    const sAfterClear = await treeState();
+    check('清掉筛选后没有偷偷选中被隐藏的文档',
+      sAfterClear.checked === visibleDesc, `checked=${sAfterClear.checked} 期望=${visibleDesc}`);
+  }
+
   await uncheckAll();
   await evalJS(`document.getElementById('fbe-all').click()`);
   const sAll = await treeState();
@@ -239,12 +312,17 @@ try {
   const sFilt = await treeState();
   check('过滤不改变勾选状态', sFilt.checked === beforeFilter, `${beforeFilter} -> ${sFilt.checked}`);
   check('过滤确实收窄了可见行', sFilt.visible < sFilt.total, `visible=${sFilt.visible}/${sFilt.total}`);
+  const filtLabel = await evalJS(`document.getElementById('fbe-all-label').textContent`);
+  check('筛选时「全选」标签写明只作用于筛选结果',
+    filtLabel === ZH.selectAllFiltered.message, `"${filtLabel}"`);
   await evalJS(`(() => { const q=document.getElementById('fbe-q'); q.value='zzz不存在的标题'; q.dispatchEvent(new Event('input',{bubbles:true})); return true; })()`);
   const sNone = await evalJS(`(() => ({
     emptyShown: !document.getElementById('fbe-empty').hidden,
     text: document.getElementById('fbe-empty').textContent }))()`);
   check('无匹配时给出空态提示', sNone.emptyShown && sNone.text.length > 0, `"${sNone.text}"`);
   await evalJS(`(() => { const q=document.getElementById('fbe-q'); q.value=''; q.dispatchEvent(new Event('input',{bubbles:true})); return true; })()`);
+  const resetLabel = await evalJS(`document.getElementById('fbe-all-label').textContent`);
+  check('清空筛选后「全选」标签恢复', resetLabel === ZH.selectAll.message, `"${resetLabel}"`);
 
   // 日志首行不该带换行（logHasLines 的回归点）
   const sLog = await treeState();
@@ -345,6 +423,339 @@ try {
     `start.hidden=${runState.startHidden} stop.visible=${runState.stopVisible}`);
   check('运行中：重新列出被禁用', runState.scanDisabled, `scan.disabled=${runState.scanDisabled}`);
   check('运行中：进度有读数', /\d+\s*\/\s*\d+/.test(runState.progress), `"${runState.progress}"`);
+
+  // 收掉这次运行，给后面的重扫测试一个干净起点
+  await evalJS(`document.getElementById('fbe-stop').click()`);
+  for (let i = 0; i < 100; i++) {
+    if (await evalJS(`document.getElementById('fbe-stop').hidden`)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  // 在知识库页列出「我的云空间」，收起再打开：下拉必须仍指向云空间。
+  // 只按 URL 猜来源会写回「当前知识库」，和树里的内容对不上。
+  await evalJS(`(() => {
+    const s=document.getElementById('fbe-src'); s.value='drive';
+    s.dispatchEvent(new Event('change',{bubbles:true}));
+    document.getElementById('fbe-scan').click();
+    return true;
+  })()`);
+  for (let i = 0; i < 150; i++) {
+    const ok = await evalJS(`!document.getElementById('fbe-scan').disabled
+      && document.querySelectorAll('#fbe-tree > div').length === 5`);
+    if (ok) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  await evalJS(`window.__panelToggle()`); // 收起
+  await evalJS(`window.__panelToggle()`); // 再打开
+  await new Promise((r) => setTimeout(r, 300));
+  const reopened = await evalJS(`({
+    src: document.getElementById('fbe-src').value,
+    first: (document.querySelector('#fbe-tree .fbe-name')||{}).textContent,
+  })`);
+  check('重开面板后来源仍对应已列出的云空间列表',
+    reopened.src === 'drive' && reopened.first === '我的文档',
+    `src=${reopened.src} first="${reopened.first}"`);
+
+  // 只切到 URL 模式、还没列出时，重开/换语言都不能让来源说 URL、树却是云空间
+  await evalJS(`(() => {
+    const s=document.getElementById('fbe-src'); s.value='urls';
+    s.dispatchEvent(new Event('change',{bubbles:true})); return true;
+  })()`);
+  await evalJS(`window.__panelToggle()`);
+  await evalJS(`window.__panelToggle()`);
+  await new Promise((r) => setTimeout(r, 300));
+  const urlReopen = await evalJS(`({
+    src: document.getElementById('fbe-src').value,
+    first: (document.querySelector('#fbe-tree .fbe-name')||{}).textContent,
+  })`);
+  check('切到 URL 模式但未列出时，重开仍显示列表真实来源',
+    urlReopen.src === 'drive' && urlReopen.first === '我的文档',
+    `src=${urlReopen.src} first="${urlReopen.first}"`);
+
+  await evalJS(`(() => {
+    const s=document.getElementById('fbe-src'); s.value='urls';
+    s.dispatchEvent(new Event('change',{bubbles:true})); return true;
+  })()`);
+  await evalJS(`(() => { const l=document.getElementById('fbe-lang'); l.value='en'; l.dispatchEvent(new Event('change',{bubbles:true})); return true })()`);
+  await new Promise((r) => setTimeout(r, 800));
+  const urlLang = await evalJS(`({
+    src: document.getElementById('fbe-src').value,
+    first: (document.querySelector('#fbe-tree .fbe-name')||{}).textContent,
+  })`);
+  check('切到 URL 模式后换语言，来源仍跟随列表',
+    urlLang.src === 'drive' && urlLang.first === '我的文档',
+    `src=${urlLang.src} first="${urlLang.first}"`);
+
+  // SPA 导航到不会自动重列的页面（云空间首页）：来源继续跟随可见树
+  await openFixture('st=listed&lang=zh_CN');
+  await evalJS(`history.pushState({}, '', '/drive/home')`);
+  await evalJS(`window.__panelToggle()`);
+  await evalJS(`window.__panelToggle()`);
+  await new Promise((r) => setTimeout(r, 300));
+  const spaSource = await evalJS(`({
+    src: document.getElementById('fbe-src').value,
+    first: (document.querySelector('#fbe-tree .fbe-name')||{}).textContent,
+    rows: document.querySelectorAll('#fbe-tree > div').length,
+  })`);
+  check('SPA 导航到非自动列页面时来源仍跟随可见树',
+    spaSource.src === 'wiki' && spaSource.first === '产品与设计' && spaSource.rows === 11,
+    `src=${spaSource.src} first="${spaSource.first}" rows=${spaSource.rows}`);
+
+  // URL 列表没有修改时间：按时间勾选必须禁用并说明，而不是白点一次清空选择
+  await openFixture('st=listed&notime=1&lang=zh_CN');
+  const noTime = await evalJS(`({
+    disabled: document.getElementById('fbe-since').disabled,
+    title: document.getElementById('fbe-since').title,
+    rows: document.querySelectorAll('#fbe-tree > div').length,
+  })`);
+  check('没有修改时间时禁用「按修改时间勾选」并说明原因',
+    noTime.disabled && noTime.rows === 11 && noTime.title === ZH.recentNoTime.message,
+    `disabled=${noTime.disabled} rows=${noTime.rows} title="${noTime.title}"`);
+
+  // 按时间勾选 0 命中会把所有勾选清空，此时「全选」也必须跟着取消勾选
+  await openFixture('st=listed&old=1&lang=zh_CN');
+  await evalJS(`document.getElementById('fbe-all').click()`);
+  await new Promise((r) => setTimeout(r, 150));
+  await evalJS(`(() => {
+    const s=document.getElementById('fbe-since'); s.value='90';
+    s.dispatchEvent(new Event('change',{bubbles:true}));
+    return true;
+  })()`);
+  await new Promise((r) => setTimeout(r, 250));
+  const cleared = await evalJS(`(() => {
+    const all=document.getElementById('fbe-all');
+    return {
+      checked: [...document.querySelectorAll('${CB}')].filter(b=>b.checked).length,
+      allChecked: all.checked, allIndeterminate: all.indeterminate,
+    };
+  })()`);
+  check('按时间勾选 0 命中后「全选」不保持勾选',
+    cleared.checked === 0 && !cleared.allChecked && !cleared.allIndeterminate,
+    `checked=${cleared.checked} all=${cleared.allChecked}/${cleared.allIndeterminate}`);
+
+  // 新一轮列出必须清掉上一轮的进度条和重试按钮（旧失败原因已随日志一起清空）
+  await openFixture('st=main&failall=1&lang=zh_CN');
+  await evalJS(`document.getElementById('fbe-all').click()`);
+  await evalJS(`document.getElementById('fbe-start').click()`);
+  for (let i = 0; i < 300; i++) {
+    if (await evalJS(`!document.getElementById('fbe-start').hidden`)) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const failedRun = await evalJS(`({
+    retryHidden: document.getElementById('fbe-retry').hidden,
+    progressHidden: document.getElementById('fbe-progress').hidden,
+  })`);
+  check('失败收尾后重试和进度都可见', !failedRun.retryHidden && !failedRun.progressHidden,
+    `retry.hidden=${failedRun.retryHidden} progress.hidden=${failedRun.progressHidden}`);
+  await evalJS(`(() => { const l=document.getElementById('fbe-lang'); l.value='en'; l.dispatchEvent(new Event('change',{bubbles:true})); return true })()`);
+  await new Promise((r) => setTimeout(r, 800));
+  const failedAfterLang = await evalJS(`({
+    retryHidden: document.getElementById('fbe-retry').hidden,
+    retryText: document.getElementById('fbe-retry').textContent,
+    progressHidden: document.getElementById('fbe-progress').hidden,
+  })`);
+  check('失败收尾后换语言重试按钮和进度仍在',
+    !failedAfterLang.retryHidden && failedAfterLang.retryText.length > 0 && !failedAfterLang.progressHidden,
+    `retry.hidden=${failedAfterLang.retryHidden} retry="${failedAfterLang.retryText}" progress.hidden=${failedAfterLang.progressHidden}`);
+  await evalJS(`document.getElementById('fbe-scan').click()`);
+  for (let i = 0; i < 150; i++) {
+    const ok = await evalJS(`!document.getElementById('fbe-scan').disabled
+      && document.querySelectorAll('#fbe-tree > div').length === 11`);
+    if (ok) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const afterRescan = await evalJS(`({
+    retryHidden: document.getElementById('fbe-retry').hidden,
+    progressHidden: document.getElementById('fbe-progress').hidden,
+  })`);
+  check('重新列出后上一轮的重试和进度不再残留',
+    afterRescan.retryHidden && afterRescan.progressHidden,
+    `retry.hidden=${afterRescan.retryHidden} progress.hidden=${afterRescan.progressHidden}`);
+
+  // 键盘/辅助技术触发的是 detail=0 的 click（不是 pointer 事件），浮标也必须能开
+  await evalJS(`window.__panelToggle()`); // 先收起
+  await evalJS(`(() => {
+    const fab=document.getElementById('fbe-fab'); fab.focus(); fab.click(); return true;
+  })()`);
+  await new Promise((r) => setTimeout(r, 300));
+  check('键盘/辅助技术能打开浮标',
+    !(await evalJS(`document.getElementById('fbe-panel').hidden`)),
+    'detail=0 click 后面板应展开');
+
+  // 筛选框里的 Esc 是「清空搜索」，不是「关面板」
+  const labelBeforeEsc = await evalJS(`document.getElementById('fbe-all-label').textContent`);
+  await evalJS(`(() => {
+    const q=document.getElementById('fbe-q'); q.value='登录';
+    q.dispatchEvent(new Event('input',{bubbles:true})); q.focus(); return true;
+  })()`);
+  await S('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+  await S('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+  await new Promise((r) => setTimeout(r, 200));
+  const escState = await evalJS(`({
+    hidden: document.getElementById('fbe-panel').hidden,
+    q: document.getElementById('fbe-q').value,
+    label: document.getElementById('fbe-all-label').textContent,
+  })`);
+  check('筛选框里的 Esc 只清空筛选，不关面板',
+    !escState.hidden && escState.q === '' && escState.label === labelBeforeEsc,
+    `hidden=${escState.hidden} q="${escState.q}" label="${escState.label}" 期望恢复 "${labelBeforeEsc}"`);
+
+  // 列出中换语言：不能把「正在列出」换成开场白，也不能放开重复扫描
+  await openFixture('st=listing&freeze=1&lang=zh_CN');
+  for (let i = 0; i < 100; i++) {
+    if (await evalJS(`document.getElementById('fbe-scan').disabled`)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  await evalJS(`(() => { const l=document.getElementById('fbe-lang'); l.value='en'; l.dispatchEvent(new Event('change',{bubbles:true})); return true })()`);
+  await new Promise((r) => setTimeout(r, 800));
+  const scanAfterLang = await evalJS(`({
+    scanDisabled: document.getElementById('fbe-scan').disabled,
+    startDisabled: document.getElementById('fbe-start').disabled,
+    qDisabled: document.getElementById('fbe-q').disabled,
+    emptyVisible: !document.getElementById('fbe-empty').hidden,
+    emptyText: document.getElementById('fbe-empty').textContent,
+  })`);
+  check('列出中换语言后仍显示进行中且不能重复发起',
+    scanAfterLang.scanDisabled && scanAfterLang.startDisabled && scanAfterLang.qDisabled
+      && scanAfterLang.emptyVisible && scanAfterLang.emptyText.length > 0,
+    `scan.disabled=${scanAfterLang.scanDisabled} start.disabled=${scanAfterLang.startDisabled} q.disabled=${scanAfterLang.qDisabled} empty="${scanAfterLang.emptyText}"`);
+
+  // 导出中换语言：进度和「停止」不能消失（后台还在跑）
+  await openFixture('st=main&freeze=1&lang=zh_CN');
+  await evalJS(`document.getElementById('fbe-all').click()`);
+  await evalJS(`document.getElementById('fbe-start').click()`);
+  for (let i = 0; i < 100; i++) {
+    if (!(await evalJS(`document.getElementById('fbe-stop').hidden`))) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  await new Promise((r) => setTimeout(r, 2200)); // 至少完成一篇，进度有读数
+  await evalJS(`(() => { const l=document.getElementById('fbe-lang'); l.value='en'; l.dispatchEvent(new Event('change',{bubbles:true})); return true })()`);
+  await new Promise((r) => setTimeout(r, 800));
+  const runAfterLang = await evalJS(`({
+    stopHidden: document.getElementById('fbe-stop').hidden,
+    startHidden: document.getElementById('fbe-start').hidden,
+    progressHidden: document.getElementById('fbe-progress').hidden,
+    progressText: document.getElementById('fbe-progress-text').textContent,
+    scanDisabled: document.getElementById('fbe-scan').disabled,
+    focus: (document.activeElement || {}).id,
+  })`);
+  check('导出中换语言后停止和进度仍在',
+    !runAfterLang.stopHidden && runAfterLang.startHidden
+      && !runAfterLang.progressHidden && /\d+\s*\/\s*\d+/.test(runAfterLang.progressText)
+      && runAfterLang.scanDisabled,
+    `stop.hidden=${runAfterLang.stopHidden} start.hidden=${runAfterLang.startHidden} progress.hidden=${runAfterLang.progressHidden} "${runAfterLang.progressText}" scan.disabled=${runAfterLang.scanDisabled}`);
+  check('换语言后面板重建仍把焦点留在语言选择器上',
+    runAfterLang.focus === 'fbe-lang', `focus=${runAfterLang.focus}`);
+  await evalJS(`document.getElementById('fbe-stop').click()`);
+  for (let i = 0; i < 100; i++) {
+    if (await evalJS(`document.getElementById('fbe-stop').hidden`)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  // 还没列出文档时筛选没有对象：不能把「选好来源」提示改成「没有标题匹配」
+  await openFixture('st=empty&lang=zh_CN', '/drive/home');
+  await new Promise((r) => setTimeout(r, 300));
+  const emptyState = await evalJS(`({
+    panelHidden: document.getElementById('fbe-panel').hidden,
+    qDisabled: document.getElementById('fbe-q').disabled,
+    rows: document.querySelectorAll('#fbe-tree > div').length,
+  })`);
+  check('还没列出文档时筛选框不可用',
+    !emptyState.panelHidden && emptyState.qDisabled && emptyState.rows === 0,
+    `panel.hidden=${emptyState.panelHidden} q.disabled=${emptyState.qDisabled} rows=${emptyState.rows}`);
+  await evalJS(`document.getElementById('fbe-scan').click()`);
+  for (let i = 0; i < 100; i++) {
+    if (await evalJS(`!document.getElementById('fbe-scan').disabled
+      && document.querySelectorAll('#fbe-tree > div').length === 5`)) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  check('列出之后筛选框恢复可用',
+    !(await evalJS(`document.getElementById('fbe-q').disabled`)),
+    'rows=5 后 q.disabled 应为 false');
+
+  // 停止后已完成的条目不参与下一轮：再点开始只处理剩下的
+  await openFixture('st=stopped&lang=zh_CN');
+  const stoppedState = await evalJS(`(() => {
+    const boxes=[...document.querySelectorAll('${CB}')];
+    return {
+      checked: boxes.filter(b=>b.checked).length,
+      firstDone: !boxes[1].checked,
+      restStillChecked: boxes[2].checked && boxes[3].checked,
+      startHidden: document.getElementById('fbe-start').hidden,
+      progress: document.getElementById('fbe-progress-text').textContent,
+      log: document.getElementById('fbe-log').textContent,
+    };
+  })()`);
+  check('停止后已完成的条目取消勾选，剩下的保持勾选',
+    stoppedState.checked === 6 && stoppedState.firstDone && stoppedState.restStillChecked
+      && !stoppedState.startHidden,
+    `checked=${stoppedState.checked} firstDone=${stoppedState.firstDone} rest=${stoppedState.restStillChecked} start.hidden=${stoppedState.startHidden} "${stoppedState.progress}"`);
+  check('停止后的收尾日志不冒充「导出完成」',
+    stoppedState.log.includes(ZH.doneZipPartial.message.split('$1')[0])
+      && !stoppedState.log.includes('导出完成'),
+    stoppedState.log.replace(/\n/g, ' / '));
+  await evalJS(`(() => { const l=document.getElementById('fbe-lang'); l.value='en'; l.dispatchEvent(new Event('change',{bubbles:true})); return true })()`);
+  await new Promise((r) => setTimeout(r, 800));
+  const stoppedAfterLang = await evalJS(`({
+    progressHidden: document.getElementById('fbe-progress').hidden,
+    progressText: document.getElementById('fbe-progress-text').textContent,
+  })`);
+  check('停止结果换语言后仍保留进度读数',
+    !stoppedAfterLang.progressHidden && /\d+\s*\/\s*\d+/.test(stoppedAfterLang.progressText),
+    `progress.hidden=${stoppedAfterLang.progressHidden} "${stoppedAfterLang.progressText}"`);
+
+  // 空文件夹列出 0 项后，空态应说明结果，而不是再邀请一次「点列出文档」
+  await openFixture('st=fab&lang=zh_CN', '/drive/folder/EMPTY');
+  await evalJS(`window.__panelToggle()`);
+  for (let i = 0; i < 100; i++) {
+    const ok = await evalJS(`!document.getElementById('fbe-scan').disabled
+      && /列出 0 项/.test(document.getElementById('fbe-log').textContent)`);
+    if (ok) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const emptyFolder = await evalJS(`({
+    hidden: document.getElementById('fbe-empty').hidden,
+    text: document.getElementById('fbe-empty').textContent,
+    qDisabled: document.getElementById('fbe-q').disabled,
+  })`);
+  check('空文件夹列出 0 项后给出「没有文档」而不是重复邀请',
+    !emptyFolder.hidden && emptyFolder.text === ZH.emptyNoDocs.message && emptyFolder.qDisabled,
+    `hidden=${emptyFolder.hidden} text="${emptyFolder.text}" q.disabled=${emptyFolder.qDisabled}`);
+  await evalJS(`window.__panelToggle()`);
+  await evalJS(`window.__panelToggle()`);
+  await new Promise((r) => setTimeout(r, 300));
+  const emptyReopen = await evalJS(`({
+    hidden: document.getElementById('fbe-empty').hidden,
+    text: document.getElementById('fbe-empty').textContent,
+    src: document.getElementById('fbe-src').value,
+  })`);
+  check('空文件夹结果收起再开仍保留',
+    !emptyReopen.hidden && emptyReopen.text === ZH.emptyNoDocs.message
+      && emptyReopen.src === 'folder',
+    `hidden=${emptyReopen.hidden} text="${emptyReopen.text}" src=${emptyReopen.src}`);
+
+  // 来源自动切换（选错来源后点列出）不能把「正在列出…」擦成开场白
+  await openFixture('st=empty&lang=zh_CN&slow=1', '/drive/home');
+  await evalJS(`(() => {
+    const s=document.getElementById('fbe-src'); s.value='wiki';
+    s.dispatchEvent(new Event('change',{bubbles:true})); return true;
+  })()`);
+  await evalJS(`document.getElementById('fbe-scan').click()`);
+  await new Promise((r) => setTimeout(r, 200));
+  const autoSwitch = await evalJS(`({
+    src: document.getElementById('fbe-src').value,
+    empty: document.getElementById('fbe-empty').textContent,
+    busy: document.getElementById('fbe-empty').classList.contains('busy'),
+    scanDisabled: document.getElementById('fbe-scan').disabled,
+  })`);
+  check('来源自动切换时仍显示「正在列出」',
+    autoSwitch.src === 'drive' && autoSwitch.empty === ZH.listing.message
+      && autoSwitch.busy && autoSwitch.scanDisabled,
+    `src=${autoSwitch.src} empty="${autoSwitch.empty}" busy=${autoSwitch.busy} scan.disabled=${autoSwitch.scanDisabled}`);
+  for (let i = 0; i < 100; i++) {
+    if (await evalJS(`!document.getElementById('fbe-scan').disabled`)) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
 } catch (e) {
   check('检查过程未抛异常', false, e.message);
 }
